@@ -222,6 +222,7 @@ class ForceCallback:
         boxlo, boxhi = lps.extract_box()[:2]
         L = np.array(boxhi) - np.array(boxlo)
         self.hist = Histogram(0.0, geometry_type.r_max(L), dr, n_atom_types)
+        self.vel_hist = Histogram(0.0, geometry_type.r_max(L), dr, n_atom_types)
         self.dr = dr
         self.r = self.hist.bins
 
@@ -240,6 +241,7 @@ class ForceCallback:
 
     def reset_stats(self) -> None:
         self.hist.reset()
+        self.vel_hist.reset()
         self.n_steps = 0
 
     def reset_history(self) -> None:
@@ -259,6 +261,33 @@ class ForceCallback:
         result = self.hist.hist * self.w_bins[:, None] / self.n_steps
         MPI.COMM_WORLD.Allreduce(MPI.IN_PLACE, result)
         return result
+
+    # NEW CODE to use Langevin Dynamics
+    @property
+    def velocity_field(self) -> np.ndarray:
+        """True Velocity field v(z) = Momentum(z) / Count(z)."""
+        
+        # 1. Get Global Sum of Velocities (Momentum)
+        # We copy to avoid modifying the local histogram
+        momentum_sum = self.vel_hist.hist.copy()
+        MPI.COMM_WORLD.Allreduce(MPI.IN_PLACE, momentum_sum)
+
+        # 2. Get Global Sum of Particle Counts (Density)
+        count_sum = self.hist.hist.copy()
+        MPI.COMM_WORLD.Allreduce(MPI.IN_PLACE, count_sum)
+
+        # 3. Calculate Velocity: v = Sum(v_i) / Sum(1)
+        # Note: Volume weights and n_steps cancel out in the ratio, 
+        # so we can use the raw histogram sums directly.
+        
+        # Avoid division by zero
+        safe_counts = np.where(count_sum > 0, count_sum, 1.0)
+        v_z = momentum_sum / safe_counts
+        
+        # Ensure empty bins are exactly zero
+        v_z[count_sum == 0] = 0.0
+        
+        return v_z
     
     def get_potential(self) -> np.ndarray:
         """Get the potential on the histogram grid."""
@@ -293,6 +322,9 @@ class ForceCallback:
         # Identify atoms to apply external potential / force to:
         types = lps.numpy.extract_atom("type")
 
+        # Get velocity from LAMMPS
+        v = lps.numpy.extract_atom("v")
+
         # Get energies and forces (from derived class):
         f.fill(0.)
         r = pos[:, 2]
@@ -325,6 +357,14 @@ class ForceCallback:
             weights[(types == i_type + 1), i_type] = inv_perpendicular_volume
         self.hist.add_events(r, weights)
         self.n_steps += 1
+        
+        # Collection velocity (z-component) for this step:
+        vel_weights = np.zeros((nlocal, self.vel_hist.n_w))
+        for i_type in range(self.vel_hist.n_w):
+            local_types = types[:nlocal]
+            type_mask = local_types == i_type + 1
+            vel_weights[type_mask, i_type] = v[type_mask, 2] * inv_perpendicular_volume
+        self.vel_hist.add_events(r, vel_weights)
         
         # Cavitation collection:
         if self.pe_collect_interval:

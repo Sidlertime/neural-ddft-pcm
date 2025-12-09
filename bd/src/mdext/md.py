@@ -178,8 +178,16 @@ class MD:
         self.gamma = gamma
      
         # Apply Brownian dynamics fix:
-        lmp.fix(f"Ensemble all brownian {T} {seed} gamma_t {self.gamma}")
+        #lmp.fix(f"Ensemble all brownian {T} {seed} gamma_t {self.gamma}")
     
+        # OR Apply Langevin dynamics:
+        # 1. Thermostat
+        damp = 1.0 / self.gamma     # damp = mass / friction
+        lmp.fix(f"therm all langevin {T} {T} {damp} {seed}")
+
+        # 2. Integrator (NVE)
+        lmp.fix("Ensemble all nve")
+
         # Initial velocities set to zero (optional):
         lmp.velocity("all set 0.0 0.0 0.0")
     
@@ -214,6 +222,7 @@ class MD:
         lmp.fix("ext all external pf/callback 1 1")
         lps.set_fix_external_callback("ext", self.force_callback, lps)
         self.curr_density = np.zeros_like(self.force_callback.hist.hist)
+        self.curr_velocity = np.zeros_like(self.force_callback.hist.hist)
         
         # Prepare for thermo data collection:
         self.i_thermo = -1  # index of current thermo entry within cycle
@@ -239,6 +248,11 @@ class MD:
         assert(self.i_cycle)  # Need at least one cycle before getting density
         return self.curr_density
 
+    @property
+    def velocity(self) -> np.ndarray:
+        assert(self.i_cycle)
+        return self.curr_velocity
+
     def reset_vext(self, potential: Potential) -> None:
         # make external callback every 1 step, apply forces every 1 step
         self.force_callback.set_potential(potential)
@@ -257,6 +271,7 @@ class MD:
         self.i_thermo = -1
         self.i_cycle = 0
         self.curr_density.fill(0.)
+        self.curr_velocity.fill(0.)
         self.force_callback.reset_stats()
         self.force_callback.reset_history()
 
@@ -326,6 +341,7 @@ class MD:
             T, P, PE, vol = self.cycle_stats * cycle_norm
             t_cpu = time.time() - self.t_start
             self.curr_density = self.force_callback.density
+            self.curr_velocity = self.force_callback.velocity_field
             self.i_cycle += 1
             if self.enable_gcmc:
                 atoms1 = self.lps.extract_variable('n_atoms1')
@@ -353,6 +369,7 @@ class MD:
                 fp["r"] = self.force_callback.r
                 fp["n"] = self.density
                 fp["V"] = self.force_callback.get_potential()
+                fp["vz"] = self.velocity
                 fp.attrs["T"] = self.T
                 if self.P is not None:
                     fp.attrs["P"] = self.P
