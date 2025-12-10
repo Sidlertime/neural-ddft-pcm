@@ -62,7 +62,6 @@ def dft_U(rho):
     dFdrho = torch.autograd.grad(F_pred, rho)[0] / dz
     torch.set_grad_enabled(False)
     dFdrho = dFdrho.squeeze().squeeze().detach().numpy()
-
     return dFdrho
 
 # Define grid, field
@@ -70,14 +69,17 @@ grid = pde.CartesianGrid([[r[0], r[-1]]], r.shape[0], periodic=True)
 rho = pde.ScalarField(grid, data=init_rho)
 V_ext_field = pde.ScalarField(grid, data=V)
 
+# Parameters
 k = 1
 T = 2
 gamma = 8
 
+# Equations
 lap_rho = "((k*T) / gamma) * laplace(rho)"
 div_V = "(1 / gamma) * divergence(rho * gradient(V_ext_field))"
 div_F = "((k*T) / gamma) * divergence(rho * gradient(dft_u(rho)))"
 
+# Combine into PDE system
 eq = pde.PDE({"rho": f"{lap_rho} + {div_V} + {div_F}"},
             user_funcs={"dft_u": dft_U},
             consts={"V_ext_field": V_ext_field, "T": T, "k": k, "gamma": gamma},
