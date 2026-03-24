@@ -22,7 +22,7 @@ def main(args) -> None:
     np.random.seed(args.pot_seed)
 
     current_time = datetime.now().strftime("%Y-%m-%d")
-    results_path = f"./results/{current_time}-{args.run_id}"
+    results_path = f"./results/{current_time}_{args.run_id}_t{args.trials}_cs{args.collection_steps}_es{args.equilibration_steps}_g{args.gamma}_dt{args.dt}"
     os.makedirs(results_path, exist_ok=True)
     rnd_potential = mdext.potential.RandomGaussianSum()
 
@@ -33,7 +33,8 @@ def main(args) -> None:
             T=T,
             P=P,
             seed=i+1,
-            potential=mdext.potential.GaussianSum([0], [5], [1]),
+#            potential=mdext.potential.GaussianSum([0], [5], [1]),
+            potential=mdext.potential.Gaussian(0, 5, 1),
             geometry_type=mdext.geometry.Planar,
             n_atom_types=1,
             potential_type=1,
