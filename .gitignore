@@ -1,3 +1,5 @@
+data/
+
 *.lammps
 *.lammpstrj
 *.h5
