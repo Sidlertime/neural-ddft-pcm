@@ -121,8 +121,22 @@ def dft_U_phiflow(rho_grid):
 ################
 ##### DDFT #####
 ################
+dx = float(box_length / domain_resolution)
 
-def step(rho, v, dt, gamma, eta, m, k, T, V_ext):
+def get_alpha(t, t_range):
+    """
+    Smoothly decays the NN multiplier from a starting boost to a final reduction.
+    """
+    alpha_start = 1.3  # 130% strength at t=0
+    alpha_end = 0.6    # 60% strength at the end
+    
+    # tau controls how fast it decays (t_range/4 means it decays mostly in the first half)
+    tau = t_range / 4.0 
+    
+    #return alpha_end + (alpha_start - alpha_end) * np.exp(-t / tau) # exponential decay
+    return alpha_start + (alpha_end - alpha_start)*(t/t_range) + np.sin(t/t_range *2*np.pi)*(1- t/t_range) # sin with linear decaying amplitude (1 to 0) + linear interpolation from alpha_start to alpha_end
+
+def step(rho, v, dt, gamma, eta, m, k, T, V_ext, alpha=1):
     """
     Performs one integration step of the DDFT equations.
     rho: CenteredGrid
@@ -133,10 +147,20 @@ def step(rho, v, dt, gamma, eta, m, k, T, V_ext):
     # ==========================================
     # Use rho.at() to interpolate density to the velocity grid faces
     rho_faces = rho.at(v)
-    flux = rho_faces * v
+    flux_centered = rho_faces * v
+
+    # Calculate dynamic Artificial Diffusion to kill the wobble (Upwind stabilization)
+    # This precisely targets steep gradients and shocks.
+    # Note: Ensure 'dx' is accessible here (e.g., passed as an argument or defined globally)
+    grad_rho = field.spatial_gradient(rho)       # Lives on the faces (Staggered)
+    D_art = 0.5 * dx * math.abs(v)               # Diffusion coeff based on local velocity
+    flux_diffusive = - D_art * grad_rho          # Diffusive flux flows down the gradient
+    
+    # 3. Combine fluxes for a stable, mass-conserving Upwind Flux
+    total_flux = flux_centered + flux_diffusive
     
     # field.divergence calculates ∇(flux) and returns it to the cell centers
-    rho_next = rho - dt * field.divergence(flux)
+    rho_next = rho - dt * field.divergence(total_flux)
     rho_next = rho_next.with_values(math.maximum(rho_next.values, 1e-6))
     
     # ==========================================
@@ -164,9 +188,10 @@ def step(rho, v, dt, gamma, eta, m, k, T, V_ext):
     vext_term = - (1.0 / m) * field.spatial_gradient(V_ext)
     
     # f) Excess Free Energy: - (1/m) ∇(δF_exc/δρ)
-    dFdrho_grid = dft_U_phiflow(rho_next)
+    dFdrho_grid = dft_U_phiflow(rho_next) * alpha
     exc_term = - (1.0 / m) * field.spatial_gradient(dFdrho_grid)
     #exc_term = - (k * T / m) * field.spatial_gradient(dFdrho_grid)
+    #exc_term = 0
     
     # Combine all explicit forces to update velocity
     v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + exc_term)
@@ -174,42 +199,52 @@ def step(rho, v, dt, gamma, eta, m, k, T, V_ext):
     return rho_next, v_next
 
 # Define your time parameters
-t_range = 4.0
-dt = args.dt
+t_range = 0.1#4.0
+#dt = args.dt
 save_time_interval = 0.01  # This replaces storage.tracker(1e-2)
-save_step_interval = max(1, int(save_time_interval / dt))
-total_steps = int(t_range / dt)
+#save_step_interval = max(1, int(save_time_interval / dt))
+#total_steps = int(t_range / dt)
+
+CFL = 0.4  # Fluid can only move 40% of a cell per step
+dt_max = args.dt
 
 V_ext_np = V_ext.values.numpy('x')
 current_time = 0.0
+target_save_time = save_time_interval
+step_num = 0
 
-for step_num in tqdm(range(total_steps + 1), desc="DDFT Simulation", unit="step", mininterval=1.0):
-    
+# Check boundary conditions
+print("Density boundaries:", rho.extrapolation)
+print("Velocity boundaries:", v.extrapolation)
+
+print("Starting PhiFlow DDFT Simulation with Dynamic Timestepping...")
+
+#for step_num in tqdm(range(total_steps + 1), desc="DDFT Simulation", unit="step", mininterval=1.0):
     # --- SAVING BLOCK ---
-    if step_num % save_step_interval == 0:
+    #if step_num % save_step_interval == 0:
         # 1. Extract raw NumPy arrays from the PhiFlow grids
         # (If you get gradient tracking errors, use: rho.values.native().detach().cpu().numpy())
-        rho_data = np.squeeze(rho.values.numpy())
-        v_data = np.squeeze(v.values.vector['x'].numpy())
+        #rho_data = np.squeeze(rho.values.numpy())
+        #v_data = np.squeeze(v.values.vector['x'].numpy())
         
         # 2. Calculate dFdrho using our PhiFlow wrapper, then extract its NumPy array
-        dFdrho_grid = dft_U_phiflow(rho)
-        dFdrho_data = np.squeeze(dFdrho_grid.values.numpy())
+        #dFdrho_grid = dft_U_phiflow(rho)
+        #dFdrho_data = np.squeeze(dFdrho_grid.values.numpy())
         
         # 3. Save the arrays to disk
-        np.save(f"{results_path}/rho{current_time:06.3f}.npy", rho_data)
-        np.save(f"{results_path}/v{current_time:06.3f}.npy", v_data)
-        np.save(f"{results_path}/V_ext{current_time:06.3f}.npy", V_ext_np)
-        np.save(f"{results_path}/dFdrho{current_time:06.3f}.npy", dFdrho_data)
+        #np.save(f"{results_path}/rho{current_time:06.3f}.npy", rho_data)
+        #np.save(f"{results_path}/v{current_time:06.3f}.npy", v_data)
+        #np.save(f"{results_path}/V_ext{current_time:06.3f}.npy", V_ext_np)
+        #np.save(f"{results_path}/dFdrho{current_time:06.3f}.npy", dFdrho_data)
         
-        #print(f"Saved state at t = {current_time:06.3f}")
+        #tqdm.write(f"Saved state at t = {current_time:06.3f}")
 
     # --- PHYSICS BLOCK ---
     # Advance the simulation by one dt using the step function we defined earlier
-    rho, v = step(rho, v, dt, gamma, eta, m, k, T, V_ext)
+    #rho, v = step(rho, v, dt, gamma, eta, m, k, T, V_ext)
     
     # Update time
-    current_time += dt
+    #current_time += dt
     
     # Example: Simple steady-state check every 100 steps
     #if step_num % 100 == 0:
@@ -220,6 +255,63 @@ for step_num in tqdm(range(total_steps + 1), desc="DDFT Simulation", unit="step"
         #if max_vel < 1e-9 and step_num > 1000:
         #    print("Steady state reached!")
         #    break
+with tqdm(total=t_range, desc="DDFT Simulation", unit="sim_time", 
+          bar_format="{l_bar}{bar}| [{elapsed}<{remaining} {postfix}]") as pbar:
+    
+    while current_time < t_range:
+        # --- 1. CALCULATE DYNAMIC dt ---
+        v_raw = v.values.vector['x'].numpy()
+        v_max = float(np.max(np.abs(v_raw)))
+        
+        # KILL SWITCH: Stop if the simulation blows up
+        if np.isnan(v_max) or np.isinf(v_max):
+            tqdm.write("ABORT: Velocity exploded to NaN or Infinity!")
+            break
+        
+        dt = CFL * dx / (v_max + 1e-6)
+        dt = min(dt, dt_max)
+        
+        # Dont overshoot end of simulation
+        dt = min(dt, t_range - current_time)
+
+        # --- UPDATE TQDM POSTFIX ---
+        pbar.set_postfix(
+            time=f"{current_time:.4f}/{t_range:.4f}", 
+            dt=f"{dt:.2e}", 
+            vmax=f"{v_max:.4f}"
+        )
+
+        # --- PHYSICS BLOCK ---
+        current_alpha = get_alpha(current_time, t_range) # boost or nerf the dFdrho
+        rho, v = step(rho, v, dt, gamma, eta, m, k, T, V_ext, current_alpha)
+        current_time += dt
+        step_num += 1
+        
+        # Update progress bar
+        pbar.update(dt)
+
+        # --- SAVING BLOCK ---
+        if current_time >= target_save_time or current_time >= t_range-1e-8:
+            rho_data = np.squeeze(rho.values.numpy())
+            v_data = np.squeeze(v.values.vector['x'].numpy())
+            
+            dFdrho_grid = dft_U_phiflow(rho)
+            dFdrho_data = np.squeeze(dFdrho_grid.values.numpy())
+            dFdrho_mod_grid = dFdrho_grid * current_alpha
+            dFdrho_mod_data = np.squeeze(dFdrho_mod_grid.values.numpy())
+            
+            np.save(f"{results_path}/rho{current_time:06.3f}.npy", rho_data)
+            np.save(f"{results_path}/v{current_time:06.3f}.npy", v_data)
+            np.save(f"{results_path}/V_ext{current_time:06.3f}.npy", V_ext_np)
+            np.save(f"{results_path}/dFdrho{current_time:06.3f}.npy", dFdrho_data)
+            np.save(f"{results_path}/dFdrho_mod{current_time:06.3f}.npy", dFdrho_mod_data)
+
+            # Increment the threshold for the next save
+            target_save_time += save_time_interval
+            
+            # Optional: comment this out if the progress bar updates are enough for you!
+            # tqdm.write(f"Saved state at t = {current_time:06.3f}")
+    
 
 print("Simulation complete! Generating movie...")
-plot_movie(results_path, args.md_path, args.ref_md_path)
+plot_movie(results_path, args.md_path, args.ref_md_path, True)
