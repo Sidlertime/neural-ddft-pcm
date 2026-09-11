@@ -1,5 +1,6 @@
 import pde
 import torch
+import torch.nn.functional as F
 import numpy as np
 import h5py
 import glob
@@ -9,6 +10,8 @@ import argparse
 
 from neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
 from functions import plot_movie
+from model import SuperadiabaticNet
+from zimmermann_net import ZimmermannNet
 
 from phi.torch.flow import *
 import matplotlib.pyplot as plt
@@ -23,6 +26,11 @@ parser.add_argument('--run_id', type=str, default='g1-closed')
 parser.add_argument('--md_path', type=str, default='../data/g1-closed-dz100/avg_5000')
 parser.add_argument('--ref_md_path', type=str, default=None)
 parser.add_argument('--type', type=str, default='c2')
+parser.add_argument('--base_model', type=str, default=None)
+parser.add_argument('--sup_model', type=str, default=None)
+parser.add_argument('--disable_pft', action='store_true', help="Run pure equilibrium DDFT without the superadiabatic network")
+parser.add_argument('--enable_zimmermann', action='store_true', help="Run pure equilibrium DDFT with the superadiabatic network from Zimmermann et al.")
+parser.add_argument('--zimmermann_model', type=str, default=None)
 parser.add_argument('--k', type=float, default=1)
 parser.add_argument('--T', type=float, default=2)
 parser.add_argument('--m', type=float, default=1)
@@ -53,12 +61,36 @@ dz = r[1] - r[0]
 print(f'Number of particles: {np.sum(init_rho) * dz * 10 * 10} (dz: {dz})')
 
 # Load F model
-if int(1/dz) == 100:
-    model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz100.ckpt", map_location=torch.device('cpu'))
+device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+print(f"Using compute device: {device}")
+
+if args.enable_zimmermann:
+    base_model = ZimmermannNet().to(device)
+    base_model.load_state_dict(torch.load(f"models/{args.zimmermann_model}", map_location=device))
+elif int(1/dz) == 100:
+    base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz100.ckpt", map_location=device)
 else:
-    model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz{int(1/dz)}.ckpt", map_location=torch.device('cpu'))
+    base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz{int(1/dz)}.ckpt", map_location=device)
     
-model.eval()
+if args.base_model is not None:
+    # 2. Now, load your FINE-TUNED pure-PyTorch weights
+    finetuned_ckpt = f"models/{args.base_model}"
+    finetuned_data = torch.load(finetuned_ckpt, map_location=device)
+
+    # 3. Overwrite the base model's weights with the fine-tuned weights
+    base_model.load_state_dict(finetuned_data['state_dict'])
+
+base_model.to(device)
+base_model.eval()
+
+# B. Load the Trainable Superadiabatic Model
+sup_model = SuperadiabaticNet(channels=16).to(device)
+if args.sup_model is not None:
+    # args.sup_model should point to checkpoints/superadiabatic_net_epoch_X.ckpt
+    finetuned_ckpt = f"models/{args.sup_model}" 
+    sup_model.load_state_dict(torch.load(finetuned_ckpt, map_location=device))
+    print(f"Loaded Superadiabatic weights from {finetuned_ckpt}")
+sup_model.eval()
 
 # Define Domain and Grids
 # We define a 1D periodic box.
@@ -106,7 +138,7 @@ def dft_U_phiflow(rho_grid):
     
     # 2. Run through Neural Network
     torch.set_grad_enabled(True)
-    F_pred = model(rho_tensor)
+    F_pred = base_model(rho_tensor)
     # This computes the derivative δF_exc/δρ
     dFdrho = torch.autograd.grad(F_pred, rho_tensor)[0] / dz
     torch.set_grad_enabled(False)
@@ -118,6 +150,58 @@ def dft_U_phiflow(rho_grid):
     dFdrho_phi = math.tensor(dFdrho_1d, spatial('x'))
     return CenteredGrid(dFdrho_phi, extrapolation.PERIODIC, bounds=rho_grid.bounds)
 
+def get_f_sup_phiflow(rho_grid, v_grid):
+    """ Wrapped Superadiabatic Force """
+    if args.disable_pft or args.enable_zimmermann:
+        # Return a grid of pure 0.0 forces
+        return StaggeredGrid(math.zeros(spatial(x=domain_resolution)), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+
+    # Extract PyTorch tensors and send to device
+    rho_pt = rho_grid.values.native().unsqueeze(0).float().to(device)
+    v_pt = v_grid.values.vector['x'].native().unsqueeze(0).float().to(device)
+    
+    # Forward pass (no gradients needed for evaluation)
+    with torch.no_grad():
+        f_sup_pred = sup_model(rho_pt, v_pt).squeeze()
+        
+    # Repackage as StaggeredGrid since it directly applies to velocity
+    f_sup_phi = math.tensor(f_sup_pred, spatial('x'))
+    return StaggeredGrid(f_sup_phi, extrapolation.PERIODIC, bounds=rho_grid.bounds)
+
+def get_zimmermann_force_phiflow(rho_grid, v_grid, z_model):
+    """ Wrapped Zimmermann Superadiabatic Force """
+    
+    # 1. Extract 1D arrays from PhiFlow
+    rho = rho_grid.values.native().squeeze().float().to(device)
+    v_z = v_grid.values.vector['x'].native().squeeze().float().to(device)
+    
+    # 2. Create the 4-channel input [rho, v_x, v_y, v_z]
+    # The network expects all three velocity components, so we pad x and y with zeros[cite: 1].
+    zeros = torch.zeros_like(rho)
+    x_full = torch.stack([rho, zeros, zeros, v_z], dim=0) # Shape: (4, N)
+    
+    # 3. Apply Periodic Padding
+    # We need a centered window of 561 points[cite: 1]. 
+    # Therefore, we pad 280 points on the left and 280 on the right using circular boundaries.
+    x_padded = F.pad(x_full.unsqueeze(0), (280, 280), mode='circular').squeeze(0)
+    
+    # 4. Extract Sliding Windows
+    # unfold(dimension, size, step) splits our tensor into N windows of size 561
+    windows = x_padded.unfold(1, 561, 1) # Shape: (4, N, 561)
+    
+    # Rearrange to PyTorch format: (Batch=N, Channels=4, Length=561)
+    batch_input = windows.permute(1, 0, 2) 
+    
+    # 5. Predict the internal force field
+    with torch.no_grad():
+        f_pred = z_model(batch_input) # Outputs (N, 3) representing f_x, f_y, f_z
+        
+    # 6. Extract the z-component and repackage for PhiFlow
+    f_z_pred = f_pred[:, 2]
+    
+    f_z_phi = math.tensor(f_z_pred.cpu().numpy(), spatial('x'))
+    return StaggeredGrid(f_z_phi, extrapolation.PERIODIC, bounds=rho_grid.bounds)
+
 ################
 ##### DDFT #####
 ################
@@ -126,6 +210,7 @@ dx = float(box_length / domain_resolution)
 def get_alpha(t, t_range):
     """
     Smoothly decays the NN multiplier from a starting boost to a final reduction.
+    WARNING: This should match with the alpha value used for training the superadiabatic model
     """
     alpha_start = 1.3  # 130% strength at t=0
     alpha_end = 0.6    # 60% strength at the end
@@ -133,8 +218,9 @@ def get_alpha(t, t_range):
     # tau controls how fast it decays (t_range/4 means it decays mostly in the first half)
     tau = t_range / 4.0 
     
+    return 1
     #return alpha_end + (alpha_start - alpha_end) * np.exp(-t / tau) # exponential decay
-    return alpha_start + (alpha_end - alpha_start)*(t/t_range) + np.sin(t/t_range *2*np.pi)*(1- t/t_range) # sin with linear decaying amplitude (1 to 0) + linear interpolation from alpha_start to alpha_end
+    #return alpha_start + (alpha_end - alpha_start)*(t/t_range) + np.sin(t/t_range *2*np.pi)*(1- t/t_range) # sin with linear decaying amplitude (1 to 0) + linear interpolation from alpha_start to alpha_end
 
 def step(rho, v, dt, gamma, eta, m, k, T, V_ext, alpha=1):
     """
@@ -188,18 +274,25 @@ def step(rho, v, dt, gamma, eta, m, k, T, V_ext, alpha=1):
     vext_term = - (1.0 / m) * field.spatial_gradient(V_ext)
     
     # f) Excess Free Energy: - (1/m) ∇(δF_exc/δρ)
-    dFdrho_grid = dft_U_phiflow(rho_next) * alpha
-    exc_term = - (1.0 / m) * field.spatial_gradient(dFdrho_grid)
-    #exc_term = - (k * T / m) * field.spatial_gradient(dFdrho_grid)
+    if args.enable_zimmermann:
+        # Zimmermann et al. net predicts direct internal force, no derivation required
+        exc_term = get_zimmermann_force_phiflow(rho_next, v, base_model)
+    else:
+        dFdrho_grid = dft_U_phiflow(rho_next) * alpha
+        exc_term = - (1.0 / m) * field.spatial_gradient(dFdrho_grid)
+        #exc_term = - (k * T / m) * field.spatial_gradient(dFdrho_grid)
     #exc_term = 0
+
+    # g) Superadiabatic Force
+    f_sup_grid = get_f_sup_phiflow(rho_next, v)
     
     # Combine all explicit forces to update velocity
-    v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + exc_term)
+    v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + exc_term + f_sup_grid)
     
     return rho_next, v_next
 
 # Define your time parameters
-t_range = 0.1#4.0
+t_range = 4.0
 #dt = args.dt
 save_time_interval = 0.01  # This replaces storage.tracker(1e-2)
 #save_step_interval = max(1, int(save_time_interval / dt))
@@ -294,17 +387,33 @@ with tqdm(total=t_range, desc="DDFT Simulation", unit="sim_time",
         if current_time >= target_save_time or current_time >= t_range-1e-8:
             rho_data = np.squeeze(rho.values.numpy())
             v_data = np.squeeze(v.values.vector['x'].numpy())
-            
-            dFdrho_grid = dft_U_phiflow(rho)
-            dFdrho_data = np.squeeze(dFdrho_grid.values.numpy())
-            dFdrho_mod_grid = dFdrho_grid * current_alpha
-            dFdrho_mod_data = np.squeeze(dFdrho_mod_grid.values.numpy())
+
+            if args.enable_zimmermann:
+                # Zimmermann predicts the TOTAL internal force directly
+                z_force_grid = get_zimmermann_force_phiflow(rho, v, base_model)
+                f_total_data = np.squeeze(z_force_grid.values.vector['x'].numpy())
+                
+                # We map the total force to 'dFdrho_mod' so your plotter still works,
+                # and pad the unused arrays with zeros.
+                dFdrho_data = np.zeros_like(rho_data)
+                dFdrho_mod_data = f_total_data
+                f_sup_data = np.zeros_like(rho_data)
+            else:
+                # Standard PFT-Hybrid logic
+                dFdrho_grid = dft_U_phiflow(rho)
+                dFdrho_data = np.squeeze(dFdrho_grid.values.numpy())
+                dFdrho_mod_grid = dFdrho_grid * current_alpha
+                dFdrho_mod_data = np.squeeze(dFdrho_mod_grid.values.numpy())
+
+                f_sup_grid = get_f_sup_phiflow(rho, v)
+                f_sup_data = np.squeeze(f_sup_grid.values.vector['x'].numpy())
             
             np.save(f"{results_path}/rho{current_time:06.3f}.npy", rho_data)
             np.save(f"{results_path}/v{current_time:06.3f}.npy", v_data)
             np.save(f"{results_path}/V_ext{current_time:06.3f}.npy", V_ext_np)
             np.save(f"{results_path}/dFdrho{current_time:06.3f}.npy", dFdrho_data)
             np.save(f"{results_path}/dFdrho_mod{current_time:06.3f}.npy", dFdrho_mod_data)
+            np.save(f"{results_path}/f_sup{current_time:06.3f}.npy", f_sup_data)
 
             # Increment the threshold for the next save
             target_save_time += save_time_interval
