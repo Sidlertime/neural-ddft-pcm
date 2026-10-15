@@ -9,9 +9,9 @@ from tqdm import tqdm
 from phi.torch.flow import *
 
 # Import our custom modules
-from dataset import MDWindowDataset
-from model import SuperadiabaticNet
-from neural_free_energy import NeuralFreeEnergy
+from neural_ddft.data.dataset import MDWindowDataset
+from neural_ddft.models.model import SuperadiabaticNet
+from neural_ddft.models.neural_free_energy import NeuralFreeEnergy
 
 parser = argparse.ArgumentParser()
 parser.add_argument('--run_id', type=str, required=True)

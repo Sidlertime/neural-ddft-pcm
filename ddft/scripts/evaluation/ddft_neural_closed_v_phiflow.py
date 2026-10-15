@@ -8,10 +8,10 @@ from datetime import datetime
 import os
 import argparse
 
-from neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
-from functions import plot_movie
-from model import SuperadiabaticNet
-from zimmermann_net import ZimmermannNet
+from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
+from neural_ddft.utils.functions import plot_movie
+from neural_ddft.models.model import SuperadiabaticNet
+from neural_ddft.models.zimmermann_net import ZimmermannNet
 
 from phi.torch.flow import *
 import matplotlib.pyplot as plt

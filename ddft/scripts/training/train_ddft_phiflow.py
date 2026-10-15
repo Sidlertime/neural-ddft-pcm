@@ -7,9 +7,12 @@ import glob
 import os
 import argparse
 from tqdm import tqdm
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
 
 from neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
 from phi.torch.flow import *
+from scipy.ndimage import gaussian_filter1d
 
 #################
 ##### Setup #####
@@ -45,15 +48,87 @@ md_file_list = sorted(glob.glob(file_pattern))
 if len(md_file_list) < 2:
     raise FileNotFoundError("Need at least 2 MD files to compute a time step!")
 
+sigma_smooth = 4.0
 md_data = []
+md_data_raw = []
 for file_path in md_file_list:
     with h5py.File(file_path, 'r') as f:
         rho_md = np.array(f['n']).flatten()
         v_md = np.array(f['vz']).flatten()
+
+        # Apply Periodic Gaussian Smoothing
+        rho_smooth = gaussian_filter1d(rho_md, sigma=sigma_smooth, mode='wrap')
+        v_smooth = gaussian_filter1d(v_md, sigma=sigma_smooth, mode='wrap')
+
         if len(md_data) == 0:
             V_ext_np = np.array(f['V']).flatten()
             r_np = np.array(f['r']).flatten()
-        md_data.append({'rho': rho_md, 'v': v_md})
+
+        md_data_raw.append({'rho': rho_md, 'v': v_md})
+        md_data.append({'rho': rho_smooth, 'v': v_smooth})
+
+'''
+print("Generating MD trajectory animation...")
+
+# Setup the figure and axes
+fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(12, 5))
+fig.suptitle('MD Trajectory (Smoothed Target Data)')
+
+# Initialize the lines
+line_rho, = ax1.plot([], [], 'b-', lw=2)
+line_v, = ax2.plot([], [], 'b-', lw=2)
+line_rho_raw, = ax1.plot([], [], 'r--', lw=2)
+line_v_raw, = ax2.plot([], [], 'r--', lw=2)
+
+# Set axis limits
+ax1.set_xlim(r_np[0], r_np[-1])
+ax1.set_ylim(0, np.max([np.max(d['rho']) for d in [*md_data, *md_data_raw]]) * 1.1)
+ax1.set_title('Density (rho)')
+ax1.set_xlabel('z')
+
+ax2.set_xlim(r_np[0], r_np[-1])
+v_max = np.max([np.max(np.abs(d['v'])) for d in [*md_data, *md_data_raw]])
+ax2.set_ylim(-v_max * 1.1, v_max * 1.1)
+ax2.set_title('Velocity (v)')
+ax2.set_xlabel('z')
+
+# Add a time/frame counter text
+time_text = ax1.text(0.05, 0.95, '', transform=ax1.transAxes, va='top')
+
+# Initialization function
+def init():
+    line_rho.set_data([], [])
+    line_v.set_data([], [])
+    line_rho_raw.set_data([], [])
+    line_v_raw.set_data([], [])
+    time_text.set_text('')
+    return line_rho, line_v, line_rho_raw, line_v_raw, time_text
+
+# Animation update function
+def animate(i):
+    line_rho.set_data(r_np, md_data[i]['rho'])
+    line_v.set_data(r_np, md_data[i]['v'])
+    line_rho_raw.set_data(r_np, md_data_raw[i]['rho'])
+    line_v_raw.set_data(r_np, md_data_raw[i]['v'])
+    
+    # Assuming each frame is separated by 'time_between_md_saves' (e.g., 0.01)
+    current_time = i * 0.01 
+    time_text.set_text(f'Time: {current_time:.2f}')
+    return line_rho, line_v, line_rho_raw, line_v_raw, time_text
+
+# Create the animation
+anim = animation.FuncAnimation(
+    fig, animate, init_func=init,
+    frames=len(md_data), interval=50, blit=True
+)
+
+# Save the animation (requires ffmpeg installed)
+save_path = f"md_smoothed{sigma_smooth}_trajectory.mp4"
+anim.save(save_path, writer='ffmpeg', fps=30)
+print(f"Animation saved to {save_path}")
+
+plt.close(fig) # Prevent the plot from hanging the terminal
+'''
 
 dz = r_np[1] - r_np[0]
 box_length = r_np[-1] - r_np[0]
@@ -146,59 +221,91 @@ def step_diff(rho, v, dt, gamma, eta, m, k, T, V_ext):
 
 print("Starting End-to-End Fine-Tuning...")
 
+window_size = 50
+
 for epoch in range(args.epochs):
     epoch_loss = 0.0
+    num_windows = 0
+
+    #loss_v_scale = 0.1
+    progress = epoch / max(1, args.epochs - 1)  # progression of epochs (0.0 to 1.0)
+    ramp_progress = (progress - 0.1) / 0.8
+    ramp_progress = max(0.0, min(1.0, ramp_progress))   # start rising at 0.1 and maximizes at 0.9
+    loss_v_scale = 0.1 + (ramp_progress * 0.9)  # 0.1 for the first 10% progress, ramps to 1.0 at 90% and stays there to focus on learning velocity towards the end
     
     # Iterate through the MD trajectory in pairs: (t) -> target(t + save_interval)
     # We use tqdm on the inner loop to show progress through the trajectory
-    pbar = tqdm(range(len(md_data) - 1), desc=f"Epoch {epoch+1}/{args.epochs}")
+    pbar = tqdm(range(0, len(md_data) - 1, window_size), desc=f"Epoch {epoch+1}/{args.epochs}")
+
+    # continous run (like production)
+    start_md = md_data[0]
+    rho_tensor = torch.tensor(start_md['rho'], dtype=torch.float32, device=device, requires_grad=True)
+    v_tensor = torch.tensor(start_md['v'], dtype=torch.float32, device=device, requires_grad=True)
     
-    for i in pbar:
-        # Get start state from MD
-        current_md = md_data[i]
-        target_md = md_data[i+1]
-        
-        # Initialize PhiFlow grids with PyTorch tensors requiring grad
-        rho_tensor = torch.tensor(current_md['rho'], dtype=torch.float32, device=device, requires_grad=True)
-        v_tensor = torch.tensor(current_md['v'], dtype=torch.float32, device=device, requires_grad=True)
-        
-        rho_phi = CenteredGrid(math.tensor(rho_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
-        v_phi = StaggeredGrid(math.tensor(v_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
-        
-        # Unroll the PDE for 'N' steps to reach the next MD save point
-        for step_pde in range(pde_steps_per_md_save):
-            rho_phi, v_phi = step_diff(rho_phi, v_phi, args.dt, args.gamma, args.eta, args.m, args.k, args.T, V_ext)
+    rho_phi = CenteredGrid(math.tensor(rho_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
+    v_phi = StaggeredGrid(math.tensor(v_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
+    
+    for start_idx in pbar:
+        # Determine the end of the current window (handle the leftover tail of the dataset)
+        end_idx = min(start_idx + window_size, len(md_data) - 1)
+
+        optimizer.zero_grad()
+        window_loss = 0.0
+
+        # INNER LOOP: Unroll physics inside the window
+        for i in range(start_idx, end_idx):
+
+            # Get start state from MD
+            #current_md = md_data[i]
+            target_md = md_data[i+1]
             
-        # Extract the final predicted PyTorch tensors
-        rho_pred = rho_phi.values.native('x')
-        v_pred = v_phi.values.vector['x'].native('x')
-        
-        # Target tensors
-        rho_target = torch.tensor(target_md['rho'], dtype=torch.float32, device=device)
-        v_target = torch.tensor(target_md['v'], dtype=torch.float32, device=device)
-        
-        # Compute Loss (Mean Squared Error)
-        # We scale velocity loss to put it roughly on the same magnitude as density
-        loss_rho = F.mse_loss(rho_pred, rho_target)
-        loss_v = F.mse_loss(v_pred, v_target) 
-        
-        loss_scale = 1000.0 # scale the loss up
-        loss = (loss_rho + (loss_v * 0.1)) * loss_scale
+            # Initialize PhiFlow grids with PyTorch tensors requiring grad
+            #rho_tensor = torch.tensor(current_md['rho'], dtype=torch.float32, device=device, requires_grad=True)
+            #v_tensor = torch.tensor(current_md['v'], dtype=torch.float32, device=device, requires_grad=True)
+            
+            #rho_phi = CenteredGrid(math.tensor(rho_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
+            #v_phi = StaggeredGrid(math.tensor(v_tensor, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
+            
+            # Unroll the PDE for 'N' steps to reach the next MD save point
+            for step_pde in range(pde_steps_per_md_save):
+                rho_phi, v_phi = step_diff(rho_phi, v_phi, args.dt, args.gamma, args.eta, args.m, args.k, args.T, V_ext)
+                
+            # Extract the final predicted PyTorch tensors
+            rho_pred = rho_phi.values.native('x')
+            v_pred = v_phi.values.vector['x'].native('x')
+            
+            # Target tensors
+            rho_target = torch.tensor(target_md['rho'], dtype=torch.float32, device=device)
+            v_target = torch.tensor(target_md['v'], dtype=torch.float32, device=device)
+            
+            # Compute Loss (Mean Squared Error)
+            # We scale velocity loss to put it roughly on the same magnitude as density
+            loss_rho = F.mse_loss(rho_pred, rho_target)
+            loss_v = F.mse_loss(v_pred, v_target) 
+            
+            loss_scale = 1000.0 # scale the loss up
+            window_loss = window_loss + (loss_rho + (loss_v * loss_v_scale)) * loss_scale
         
         # Backpropagate through time
-        optimizer.zero_grad()
-        loss.backward()
+        window_loss.backward()
         
         # Optional: Gradient clipping to prevent exploding gradients during PDE backprop
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-        
         optimizer.step()
+
+        epoch_loss += window_loss.item() / (end_idx - start_idx) # Average loss per step
+        num_windows += 1
+        pbar.set_postfix({'loss': f"{epoch_loss/num_windows:.6f}"})
+
+        # continous run
+        rho_detached = rho_pred.detach().clone().requires_grad_(True)
+        v_detached = v_pred.detach().clone().requires_grad_(True)
         
-        epoch_loss += loss.item()
-        pbar.set_postfix({'loss': f"{loss.item():.6f}"})
+        # Repackage them into clean PhiFlow grids for the next iteration
+        rho_phi = CenteredGrid(math.tensor(rho_detached, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
+        v_phi = StaggeredGrid(math.tensor(v_detached, spatial('x')), extrapolation.PERIODIC, x=domain_resolution, bounds=Box(x=box_length))
         
-    avg_loss = epoch_loss / (len(md_data) - 1)
-    print(f"Epoch {epoch+1} Completed | Average Loss: {avg_loss:.6f}")
+    print(f"Epoch {epoch+1} Completed | Average Step Loss: {epoch_loss / num_windows:.6f}")
 
 # ==========================================
 # 5. Save the Fine-Tuned Copy

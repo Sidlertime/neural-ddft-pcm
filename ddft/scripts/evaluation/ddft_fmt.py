@@ -6,8 +6,8 @@ from datetime import datetime
 import os
 import argparse
 
-from functions import plot_movie_closed
-from fmt import fmt_module
+from neural_ddft.utils.functions import plot_movie_closed
+from neural_ddft.physics.fmt import fmt_module
 
 ##################
 ##### Setup #####

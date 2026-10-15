@@ -1,5 +1,5 @@
 import pytorch_lightning as pl
-from cnn import CNN, CNN_100
+from neural_ddft.models.cnn import CNN, CNN_100
 
 class NeuralFreeEnergy(pl.LightningModule):
 

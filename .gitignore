@@ -1,5 +1,11 @@
-data/
-models/
+# temporary ignores
+ddft/_functions_copy.py
+
+# builds and output results
+data
+!ddft/src/neural_ddft/data/
+ddft/models/
+ddft/results/
 
 *.lammps
 *.lammpstrj

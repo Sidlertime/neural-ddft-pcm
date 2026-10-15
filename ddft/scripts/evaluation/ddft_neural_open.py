@@ -7,8 +7,8 @@ from datetime import datetime
 import os
 import argparse
 
-from neural_free_energy import NeuralFreeEnergy
-from functions import plot_movie
+from neural_ddft.neural_free_energy import NeuralFreeEnergy
+from neural_ddft.functions import plot_movie
 
 
 ##################

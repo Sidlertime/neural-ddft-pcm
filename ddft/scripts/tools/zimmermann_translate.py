@@ -1,7 +1,7 @@
 import h5py
 import torch
 import numpy as np
-from zimmermann_net import ZimmermannNet
+from neural_ddft.models.zimmermann_net import ZimmermannNet
 
 # Load into PyTorch model
 print("Translating Keras weights to PyTorch...")

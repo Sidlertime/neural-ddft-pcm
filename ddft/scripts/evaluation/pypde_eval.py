@@ -11,34 +11,39 @@ import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter1d
 import numba as nb
 
-from neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
-from functions import plot_movie
+from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
+from neural_ddft.utils.functions import plot_movie
+from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 
 ##################
 ##### Setup #####
 ##################
 
-parser = argparse.ArgumentParser(description='neural DDFT')
-parser.add_argument('--run_id', type=str, default='g1-closed')
-parser.add_argument('--md_path', type=str, default='../data/g1-closed-dz100/avg_5000')
-parser.add_argument('--ref_md_path', type=str, default=None)
-parser.add_argument('--type', type=str, default='c2')
-parser.add_argument('--k', type=float, default=1)
-parser.add_argument('--T', type=float, default=2)
-parser.add_argument('--m', type=float, default=1)
-parser.add_argument('--gamma', type=float, default=2)
-parser.add_argument('--eta', type=float, default=0.01)
-parser.add_argument('--dt', type=float, default=1e-4)
+PARAM_SCHEME = {
+    "run_id": (str, "pypde_eval"),
+    "md_path": (str, "../data/g1-closed-dz100/avg_5000"),
+    "ref_md_path": (str, None),
+    "type": (str, "c2"),
+    #"base_model": (str, None),
+    "k": (float, 1.0),
+    "T": (float, 2.0),
+    "m": (float, 1.0),
+    "gamma": (float, 2.0),
+    "eta": (float, 0.01),
+    "dt": (float, 1e-4),
+}
 
-args = parser.parse_args()
+args = load_config(PARAM_SCHEME, description="Modular Neural DDFT in PyPDE")
 
 current_time = datetime.now().strftime("%Y-%m-%d")
-results_path = f"results/{current_time}_{args.run_id}_k{args.k}_T{args.T}_m{args.m}_g{args.gamma}_eta{args.eta}_dt{args.dt}_{args.type}"
+base_path = f"results/{current_time}_{args['run_id']}"
+results_path = get_next_result_path(base_path)
 os.makedirs(results_path, exist_ok=True)
+save_config(args, results_path)
 
 # Load MD data
 
-file_pattern = f"{args.md_path}/collection.*.h5"
+file_pattern = f"{args['md_path']}/collection.*.h5"
 md_file_list = sorted(glob.glob(file_pattern))
 
 if len(md_file_list) == 0:
@@ -54,9 +59,9 @@ print(f'Number of particles: {np.sum(init_rho) * dz * 10 * 10} (dz: {dz})')
 
 # Load F model
 if int(1/dz) == 100:
-    model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz100.ckpt", map_location=torch.device('cpu'))
+    model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=f"models/{args['type']}_dz100.ckpt", map_location=torch.device('cpu'))
 else:
-    model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=f"models/{args.type}_dz{int(1/dz)}.ckpt", map_location=torch.device('cpu'))
+    model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=f"models/{args['type']}_dz{int(1/dz)}.ckpt", map_location=torch.device('cpu'))
     
 model.eval()
 
@@ -106,11 +111,11 @@ v_field = pde.ScalarField(grid, data=0.0)     # velocity starts at 0
 state = pde.FieldCollection([rho_field, v_field])
 
 # Parameters
-k = args.k
-T = args.T
-gamma = args.gamma   # Friction
-m = args.m     # Particle mass
-eta = args.eta   # Viscosity (set to 0 if you want pure Langevin DDFT without hydrodynamics)
+k = args['k']
+T = args['T']
+gamma = args['gamma']   # Friction
+m = args['m']           # Particle mass
+eta = args['eta']       # Viscosity (set to 0 if you want pure Langevin DDFT without hydrodynamics)
 
 def safe_log(rho):
     return np.log(np.maximum(rho, 1e-10))
@@ -174,7 +179,7 @@ storage = pde.MemoryStorage()
 
 # Solve
 # Note: dt usually needs to be smaller for inertial dynamics to remain stable
-result = eq.solve(state, t_range=4, dt=args.dt,
+result = eq.solve(state, t_range=4, dt=args['dt'],
                   tracker=["progress", storage.tracker(1e-2)],
                   backend='numpy')
 
@@ -196,4 +201,4 @@ for i, field_collection in storage.items():
     dFdrho = dft_U(rho_data)
     np.save(f"{results_path}/dFdrho{i:06.3f}.npy", dFdrho)
 
-plot_movie(results_path, args.md_path, args.ref_md_path)
+plot_movie(results_path, args['md_path'], args['ref_md_path'])

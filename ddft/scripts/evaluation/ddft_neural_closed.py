@@ -7,8 +7,8 @@ from datetime import datetime
 import os
 import argparse
 
-from neural_free_energy import NeuralFreeEnergyFine
-from functions import plot_movie
+from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine
+from neural_ddft.utils.functions import plot_movie
 
 ##################
 ##### Setup #####
@@ -66,12 +66,8 @@ def dft_U(rho):
 
 # Define grid, field
 grid = pde.CartesianGrid([[r[0], r[-1]]], r.shape[0], periodic=True)
-rho_field = pde.ScalarField(grid, data=init_rho)
+rho = pde.ScalarField(grid, data=init_rho)
 V_ext_field = pde.ScalarField(grid, data=V)
-
-# Initialize State: We need a Collection of [rho, j]
-j_field = pde.VectorField(grid)     # j (momentum density) starts at 0
-state = pde.FieldCollection([rho_field, j_field])
 
 # Parameters
 k = 1
@@ -79,51 +75,33 @@ T = 2
 gamma = 8
 
 # Equations
-# Continuity: dt(rho) = -div(j)
-eq_rho = "-divergence(j)"
-
-# Momentum: dt(j) = Forces - Friction
-# Force Ideal = -k*T * grad(rho)  (Ideal Gas Pressure gradient)
-# Force Ext   = -rho * grad(V)
-# Force Ex    = -rho * grad(mu_ex)
-# Note: In your previous code, dft_u had a k*T multiplier, V did not. 
-# I preserved that scaling here.
-eq_j = ("- k*T * gradient(rho) "
-        "- rho * gradient(V_ext_field) "
-        "- (k*T) * rho * gradient(dft_u(rho)) "
-        "- gamma * j")
+lap_rho = "((k*T) / gamma) * laplace(rho)"
+div_V = "(1 / gamma) * divergence(rho * gradient(V_ext_field))"
+div_F = "((k*T) / gamma) * divergence(rho * gradient(dft_u(rho)))"
 
 # Combine into PDE system
-eq = pde.PDE(
-    {"rho": eq_rho, "j": eq_j},
-    user_funcs={"dft_u": dft_U},
-    consts={"V_ext_field": V_ext_field, "T": T, "k": k, "gamma": gamma},
-    bc=[{"type": "periodic"}, {"type": "periodic"}] # BCs for rho and j
-)
+eq = pde.PDE({"rho": f"{lap_rho} + {div_V} + {div_F}"},
+            user_funcs={"dft_u": dft_U},
+            consts={"V_ext_field": V_ext_field, "T": T, "k": k, "gamma": gamma},
+            bc=[{"type": "periodic"}])
 storage = pde.MemoryStorage()
 
 # Solve
-# Note: dt usually needs to be smaller for inertial dynamics to remain stable
-result = eq.solve(state, t_range=4, dt=1e-5,
-                  tracker=["progress", storage.tracker(1e-2)],
+result = eq.solve(rho, t_range=4, dt=1e-4,
+                  tracker=["progress", storage.tracker(1e-2), pde.SteadyStateTracker()],
                   backend='numpy')
 
 # Save results
-for i, field_collection in storage.items():
-    rho_data = field_collection[0].data  # Extract rho
-    j_data = field_collection[1].data    # Extract j
-    
+ddft_rho_list = []
+for i, field in storage.items():
     # Save density field
-    np.save(f"{results_path}/rho{i:06.3f}.npy", rho_data)
-    
-    # Save momentum field (optional, but useful for checking convergence)
-    np.save(f"{results_path}/j{i:06.3f}.npy", j_data)
+    np.save(f"{results_path}/rho{i:06.3f}.npy", field.data)
     
     # Save external potential
     np.save(f"{results_path}/V_ext{i:06.3f}.npy", V_ext_field.data)
     
     # Calculate and save dFdrho
-    dFdrho = dft_U(rho_data)
+    dFdrho = dft_U(field.data)
     np.save(f"{results_path}/dFdrho{i:06.3f}.npy", dFdrho)
 
 plot_movie(results_path, args.md_path)
