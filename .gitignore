@@ -16,3 +16,4 @@ ddft/results/
 *.npy
 __pycache__
 *.egg-info
+.aider*
