@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+import csv
 import torch
 import torch.nn as nn
 import numpy as np
@@ -33,15 +34,16 @@ PARAM_SCHEME = {
     "k": (float, 1.0),
     "T": (float, 2.0),
     "m": (float, 1.0),
-    "gamma": (float, 2.0),
-    "eta": (float, 0.01),
+    "gamma": (float, 0.1),                      # Friction coefficient (1.0 / Tdamp in LJ units)
+    "eta": (float, 0.67),                       # Shear viscosity (LJ units)
     "dt": (float, 1e-4),
     
     # Training parameters
+    "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
     "loss_weight_v": (float, 1.0),              # Balance between density loss and velocity loss
     "curriculum": (list, [
-        {"epochs": 0, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
-        {"epochs": 0, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
+        {"epochs": 15, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
+        {"epochs": 20, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
         {"epochs": 25, "window_size": 25, "batch_size": 1,  "lr": 1e-4, "stride": 10},
     ])
 }
@@ -99,6 +101,13 @@ def main():
     ckpt_dir = os.path.join(run_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     save_config(args, run_dir)
+
+    # Initialize CSV logger
+    csv_log_path = os.path.join(run_dir, "training_log.csv")
+    csv_headers = ["epoch", "phase", "window_size", "batch_size", "lr", "loss_total", "loss_rho", "loss_v"]
+    with open(csv_log_path, mode="w", newline="") as f_csv:
+        writer = csv.writer(f_csv)
+        writer.writerow(csv_headers)
 
     # Load Spatial Domain Dimensions from MD files
     md_file_list = sorted(glob.glob(f"{args['md_path']}/collection.*.h5"))
@@ -159,10 +168,13 @@ def main():
         print(f"No trainable parameters found for mode '{mode}'. Exiting.")
         return
 
-    optimizer = torch.optim.Adam(trainable_params, lr=1e-3)
+    weight_decay = float(args.get("weight_decay", 1e-4))
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3, weight_decay=weight_decay)
     global_epoch = 0
 
     print(f"\nStarting training for mode: {mode}")
+    print(f"gamma={args['gamma']} | eta={args['eta']} | weight_decay={weight_decay} | loss_weight_v={args['loss_weight_v']}")
+    print(f"Log CSV saved to: {csv_log_path}")
     print(f"Checkpoints will be saved to: {ckpt_dir}\n")
 
     # ==========================================
@@ -189,6 +201,8 @@ def main():
         for ep in range(epochs):
             global_epoch += 1
             epoch_loss = 0.0
+            epoch_loss_rho = 0.0
+            epoch_loss_v = 0.0
             num_batches = 0
 
             with tqdm(dataloader, desc=f"Epoch {global_epoch:03d} (Phase {phase_idx+1})", unit="batch") as pbar:
@@ -211,6 +225,8 @@ def main():
                     )
 
                     loss = torch.tensor(0.0, device=device)
+                    batch_loss_rho = torch.tensor(0.0, device=device)
+                    batch_loss_v = torch.tensor(0.0, device=device)
 
                     # Unroll trajectory through the PDE
                     for step_idx in range(1, window_size + 1):
@@ -219,17 +235,19 @@ def main():
                             compute_internal_force, models, dx, device, args
                         )
 
-                        # Extract predictions back to pure PyTorch tensors for loss evaluation
                         pred_rho = rho_next.values.native('batch,x')
                         pred_v = v_next.values.vector['x'].native('batch,x')
 
                         target_rho = rho_batch[:, step_idx, :]
                         target_v = v_batch[:, step_idx, :]
 
-                        loss_rho = criterion(pred_rho, target_rho)
-                        loss_v = criterion(pred_v, target_v)
+                        loss_rho_step = criterion(pred_rho, target_rho)
+                        loss_v_step = criterion(pred_v, target_v)
 
-                        loss = loss + loss_rho + (args["loss_weight_v"] * loss_v)
+                        batch_loss_rho = batch_loss_rho + loss_rho_step
+                        batch_loss_v = batch_loss_v + loss_v_step
+
+                        loss = loss + loss_rho_step + (args["loss_weight_v"] * loss_v_step)
 
                         rho_current = rho_next
                         v_current = v_next
@@ -241,11 +259,26 @@ def main():
                     optimizer.step()
 
                     epoch_loss += loss.item()
+                    epoch_loss_rho += batch_loss_rho.item()
+                    epoch_loss_v += batch_loss_v.item()
                     num_batches += 1
-                    pbar.set_postfix(loss=f"{loss.item() / window_size:.5f}")
 
-            avg_loss = epoch_loss / max(num_batches, 1)
-            print(f"Epoch {global_epoch:03d} Summary | Mean Step Loss: {avg_loss / window_size:.6f}")
+                    pbar.set_postfix(
+                        loss=f"{loss.item() / window_size:.5f}",
+                        l_rho=f"{batch_loss_rho.item() / window_size:.5f}",
+                        l_v=f"{batch_loss_v.item() / window_size:.5f}",
+                    )
+
+            n_denom = max(num_batches * window_size, 1)
+            avg_loss = epoch_loss / n_denom
+            avg_rho = epoch_loss_rho / n_denom
+            avg_v = epoch_loss_v / n_denom
+            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f}")
+
+            # Append to CSV logger
+            with open(csv_log_path, mode="a", newline="") as f_csv:
+                writer = csv.writer(f_csv)
+                writer.writerow([global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}"])
 
             # Save checkpoint per epoch or on final phase step
             if global_epoch % 5 == 0 or ep == epochs - 1:
@@ -254,6 +287,7 @@ def main():
                 torch.save(active_model.state_dict(), ckpt_path)
 
     print(f"\nTraining complete. All checkpoints saved in {ckpt_dir}")
+    print(f"Training log written to {csv_log_path}")
 
 if __name__ == "__main__":
     main()

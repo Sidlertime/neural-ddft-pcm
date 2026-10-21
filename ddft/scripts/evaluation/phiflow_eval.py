@@ -16,7 +16,8 @@ from neural_ddft.physics.phiflow_pde import PhiFlowDDFT
 
 PARAM_SCHEME = {
     "run_id": (str, "phiflow_eval"),
-    "md_path": (str, "../data/g1-closed-dz100/avg_5000"),
+    #"md_path": (str, "../data/g1-closed-dz100/avg_5000"),
+    "md_path": (str, "../data/lj_data/2026-01-21_lj_langevin_01/avg_500/"),
     "ref_md_path": (str, None),
     "model_mode": (str, "hybrid"),              # "equilibrium", "hybrid", or "zimmermann"
     "base_model_path": (str, "models/c2_dz32.ckpt"),
@@ -25,8 +26,8 @@ PARAM_SCHEME = {
     "k": (float, 1.0),
     "T": (float, 2.0),
     "m": (float, 1.0),
-    "gamma": (float, 2.0),
-    "eta": (float, 0.01),
+    "gamma": (float, 0.1),
+    "eta": (float, 0.67),
     "dt": (float, 1e-4),
 }
 
@@ -35,7 +36,7 @@ if __name__ == "__main__":
     args = load_config(PARAM_SCHEME, description="Modular Neural DDFT")
     
     current_time = datetime.now().strftime("%Y-%m-%d")
-    base_path = f"results/{current_time}_{args['run_id']}"
+    base_path = f"results/{current_time}_{args['run_id']}_{args['model_mode']}"
     results_path = get_next_result_path(base_path)
     os.makedirs(results_path, exist_ok=True)
     save_config(args, results_path) # Permanently record these settings

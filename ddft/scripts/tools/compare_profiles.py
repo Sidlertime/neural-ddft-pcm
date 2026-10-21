@@ -1,0 +1,316 @@
+import os
+import glob
+import json
+import argparse
+import numpy as np
+import h5py
+import matplotlib.pyplot as plt
+
+
+def load_npy_series(directory, prefix="rho"):
+    """
+    Loads series of numpy arrays saved as {directory}/{prefix}{time:06.3f}.npy
+    Returns sorted list of (time, array).
+    """
+    files = sorted(glob.glob(os.path.join(directory, f"{prefix}*.npy")))
+    result = []
+    for f in files:
+        basename = os.path.basename(f)
+        time_str = basename[len(prefix):-4]
+        try:
+            t = float(time_str)
+            data = np.load(f)
+            result.append((t, data))
+        except ValueError:
+            continue
+    result.sort(key=lambda item: item[0])
+    return result
+
+
+def load_md_series(md_path):
+    """
+    Loads MD files matching collection.*.h5.
+    Returns times, densities (n), velocities (vz), and grid r.
+    """
+    files = sorted(glob.glob(os.path.join(md_path, "collection.*.h5")))
+    times = []
+    rhos = []
+    vs = []
+    r_grid = None
+    for idx, f in enumerate(files):
+        with h5py.File(f, "r") as fp:
+            n = np.array(fp["n"]).flatten()
+            vz = np.array(fp["vz"]).flatten() if "vz" in fp else None
+            if r_grid is None and "r" in fp:
+                r_grid = np.array(fp["r"]).flatten()
+            rhos.append(n)
+            if vz is not None:
+                vs.append(vz)
+            times.append(idx)
+    return np.array(times), np.array(rhos), (np.array(vs) if vs else None), r_grid
+
+
+def compute_metrics(pred, target):
+    """
+    Computes MAE, MSE, and Linf (max absolute error) between two aligned 1D or 2D arrays.
+    """
+    diff = np.abs(pred - target)
+    mae = float(np.mean(diff))
+    mse = float(np.mean(diff ** 2))
+    linf = float(np.max(diff))
+    return {"mae": mae, "mse": mse, "linf": linf}
+
+
+def evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=False, max_steps=None):
+    """
+    Evaluates one prediction directory against reference data.
+    """
+    pred_rho = load_npy_series(pred_dir, prefix="rho")
+    pred_v = load_npy_series(pred_dir, prefix="v")
+
+    if not pred_rho:
+        raise FileNotFoundError(f"No rho*.npy files found in pred_dir: {pred_dir}")
+
+    r_grid = None
+    if is_ref_md:
+        _, ref_rho_arr, ref_v_arr, r_grid = load_md_series(ref_dir_or_md)
+        if ref_rho_arr is None or len(ref_rho_arr) == 0:
+            raise FileNotFoundError(f"No MD collection files found in ref path: {ref_dir_or_md}")
+        n_frames = min(len(pred_rho), len(ref_rho_arr))
+        if max_steps is not None:
+            n_frames = min(n_frames, max_steps)
+
+        times = np.array([pred_rho[i][0] for i in range(n_frames)])
+        p_rho = np.array([pred_rho[i][1] for i in range(n_frames)])
+        t_rho = ref_rho_arr[:n_frames]
+
+        has_v = (len(pred_v) >= n_frames) and (ref_v_arr is not None and len(ref_v_arr) >= n_frames)
+        p_v = np.array([pred_v[i][1] for i in range(n_frames)]) if has_v else None
+        t_v = ref_v_arr[:n_frames] if has_v else None
+    else:
+        ref_rho = load_npy_series(ref_dir_or_md, prefix="rho")
+        ref_v = load_npy_series(ref_dir_or_md, prefix="v")
+
+        if not ref_rho:
+            raise FileNotFoundError(f"No rho*.npy files found in ref_dir: {ref_dir_or_md}")
+
+        time_map = {round(t_ref, 4): d for t_ref, d in ref_rho}
+        matched_times = []
+        p_rho_list = []
+        t_rho_list = []
+        for t_p, data_p in pred_rho:
+            key = round(t_p, 4)
+            if key in time_map:
+                matched_times.append(t_p)
+                p_rho_list.append(data_p)
+                t_rho_list.append(time_map[key])
+
+        if max_steps is not None:
+            matched_times = matched_times[:max_steps]
+            p_rho_list = p_rho_list[:max_steps]
+            t_rho_list = t_rho_list[:max_steps]
+
+        times = np.array(matched_times)
+        p_rho = np.array(p_rho_list)
+        t_rho = np.array(t_rho_list)
+
+        has_v = bool(ref_v and pred_v)
+        if has_v:
+            time_map_v = {round(t, 4): d for t, d in ref_v}
+            p_v_list = []
+            t_v_list = []
+            for t_p, data_p in pred_v:
+                key = round(t_p, 4)
+                if key in time_map_v and (max_steps is None or len(p_v_list) < max_steps):
+                    p_v_list.append(data_p)
+                    t_v_list.append(time_map_v[key])
+            p_v = np.array(p_v_list)
+            t_v = np.array(t_v_list)
+        else:
+            p_v = None
+            t_v = None
+
+    if len(p_rho) == 0:
+        raise ValueError("No matching time points found between prediction and reference.")
+
+    per_step_rho = [compute_metrics(p_rho[i], t_rho[i]) for i in range(len(p_rho))]
+    overall_rho = compute_metrics(p_rho, t_rho)
+
+    report = {
+        "pred_path": pred_dir,
+        "ref_path": ref_dir_or_md,
+        "n_frames_evaluated": len(p_rho),
+        "times": times,
+        "r_grid": r_grid,
+        "p_rho": p_rho,
+        "t_rho": t_rho,
+        "p_v": p_v,
+        "t_v": t_v,
+        "per_step_rho": per_step_rho,
+        "density_metrics": {
+            "mean_mae": float(np.mean([m["mae"] for m in per_step_rho])),
+            "mean_mse": float(np.mean([m["mse"] for m in per_step_rho])),
+            "max_linf": float(np.max([m["linf"] for m in per_step_rho])),
+            "overall_mse": overall_rho["mse"],
+            "overall_linf": overall_rho["linf"],
+        }
+    }
+
+    if has_v and p_v is not None and t_v is not None and len(p_v) == len(t_v) and len(p_v) > 0:
+        per_step_v = [compute_metrics(p_v[i], t_v[i]) for i in range(len(p_v))]
+        overall_v = compute_metrics(p_v, t_v)
+        report["per_step_v"] = per_step_v
+        report["velocity_metrics"] = {
+            "mean_mae": float(np.mean([m["mae"] for m in per_step_v])),
+            "mean_mse": float(np.mean([m["mse"] for m in per_step_v])),
+            "max_linf": float(np.max([m["linf"] for m in per_step_v])),
+            "overall_mse": overall_v["mse"],
+            "overall_linf": overall_v["linf"],
+        }
+
+    return report
+
+
+def plot_comparisons(reports, labels, output_dir):
+    """
+    Generates comparison plots across multiple prediction runs vs reference.
+    """
+    os.makedirs(output_dir, exist_ok=True)
+    first_rep = reports[0]
+    times = first_rep["times"]
+    n_frames = len(times)
+
+    # 1. Error vs Time Plot
+    fig, axes = plt.subplots(2, 1, figsize=(9, 7), sharex=True)
+    for rep, label in zip(reports, labels):
+        rho_mse_time = [m["mse"] for m in rep["per_step_rho"]]
+        axes[0].plot(times[:len(rho_mse_time)], rho_mse_time, label=label, lw=1.8)
+        if "per_step_v" in rep:
+            v_mse_time = [m["mse"] for m in rep["per_step_v"]]
+            axes[1].plot(times[:len(v_mse_time)], v_mse_time, label=label, lw=1.8)
+
+    axes[0].set_ylabel("Density MSE")
+    axes[0].set_title("Density Error Evolution Over Time")
+    axes[0].grid(True, linestyle=":", alpha=0.6)
+    axes[0].legend()
+
+    axes[1].set_ylabel("Velocity MSE")
+    axes[1].set_xlabel("Time Step / Frame")
+    axes[1].set_title("Velocity Error Evolution Over Time")
+    axes[1].grid(True, linestyle=":", alpha=0.6)
+    axes[1].legend()
+
+    plt.tight_layout()
+    error_plot_path = os.path.join(output_dir, "error_vs_time.png")
+    fig.savefig(error_plot_path, dpi=300)
+    plt.close(fig)
+    print(f"Saved error evolution plot to: {error_plot_path}")
+
+    # 2. Spatial Profile Snapshots (Early, Mid, Late)
+    snapshot_indices = [
+        0,
+        n_frames // 4,
+        n_frames // 2,
+        max(n_frames - 1, 0)
+    ]
+    snapshot_indices = sorted(list(set(snapshot_indices)))
+
+    fig, axes = plt.subplots(len(snapshot_indices), 2, figsize=(12, 3 * len(snapshot_indices)), sharex=True)
+    if len(snapshot_indices) == 1:
+        axes = np.expand_dims(axes, 0)
+
+    r_coord = first_rep["r_grid"]
+    if r_coord is None:
+        r_coord = np.arange(first_rep["t_rho"].shape[1])
+
+    for row_idx, frame_idx in enumerate(snapshot_indices):
+        t_val = times[frame_idx]
+
+        # Density column
+        axes[row_idx, 0].plot(r_coord, first_rep["t_rho"][frame_idx], "k--", label="Reference", lw=2)
+        for rep, label in zip(reports, labels):
+            axes[row_idx, 0].plot(r_coord, rep["p_rho"][frame_idx], label=label, alpha=0.85)
+        axes[row_idx, 0].set_ylabel(f"t={t_val:.3f}\nDensity $\\rho$")
+        axes[row_idx, 0].grid(True, linestyle=":", alpha=0.6)
+        if row_idx == 0:
+            axes[row_idx, 0].set_title("Density Profile $\\rho(r)$")
+            axes[row_idx, 0].legend()
+
+        # Velocity column
+        if first_rep["t_v"] is not None:
+            axes[row_idx, 1].plot(r_coord, first_rep["t_v"][frame_idx], "k--", label="Reference", lw=2)
+            for rep, label in zip(reports, labels):
+                if rep["p_v"] is not None:
+                    axes[row_idx, 1].plot(r_coord, rep["p_v"][frame_idx], label=label, alpha=0.85)
+            axes[row_idx, 1].set_ylabel(f"Velocity $v_z$")
+            axes[row_idx, 1].grid(True, linestyle=":", alpha=0.6)
+            if row_idx == 0:
+                axes[row_idx, 1].set_title("Velocity Profile $v_z(r)$")
+
+    axes[-1, 0].set_xlabel("Spatial coordinate $r$")
+    axes[-1, 1].set_xlabel("Spatial coordinate $r$")
+    plt.tight_layout()
+    profiles_plot_path = os.path.join(output_dir, "profile_snapshots.png")
+    fig.savefig(profiles_plot_path, dpi=300)
+    plt.close(fig)
+    print(f"Saved snapshot profiles plot to: {profiles_plot_path}")
+
+
+def main():
+    parser = argparse.ArgumentParser(description="Evaluate and compare density & velocity error across multiple runs.")
+    parser.add_argument("--pred", type=str, nargs="+", required=True, help="One or more prediction folders (.npy files)")
+    parser.add_argument("--labels", type=str, nargs="+", default=None, help="Optional labels for each prediction folder")
+    parser.add_argument("--ref", type=str, required=True, help="Reference folder (.npy files) or MD folder (.h5 files)")
+    parser.add_argument("--is_md", action="store_true", help="Set this flag if --ref points to an MD collection folder with .h5 files")
+    parser.add_argument("--max_steps", type=int, default=None, help="Optional limit on number of time frames evaluated")
+    parser.add_argument("--plot", action="store_true", help="Generate comparative plots for profiles and errors")
+    parser.add_argument("--plot_dir", type=str, default="results/comparison_plots", help="Directory to save generated plots")
+    parser.add_argument("--out", type=str, default=None, help="Optional path to write overall JSON summary")
+    args = parser.parse_args()
+
+    pred_dirs = args.pred
+    labels = args.labels if args.labels and len(args.labels) == len(pred_dirs) else [os.path.basename(os.path.normpath(p)) for p in pred_dirs]
+
+    reports = []
+    print("\n" + "=" * 78)
+    print("                      DDFT MODEL COMPARISON SUMMARY")
+    print("=" * 78)
+    print(f"Reference: {args.ref} (is_md={args.is_md})\n")
+
+    header = f"{'Model / Run Label':<28} | {'Rho MSE':<11} | {'Rho Linf':<11} | {'Vel MSE':<11} | {'Vel Linf':<11}"
+    print(header)
+    print("-" * len(header))
+
+    json_summary = {}
+
+    for pred_dir, label in zip(pred_dirs, labels):
+        rep = evaluate_single_prediction(pred_dir, args.ref, is_ref_md=args.is_md, max_steps=args.max_steps)
+        reports.append(rep)
+
+        rho_mse = rep["density_metrics"]["overall_mse"]
+        rho_linf = rep["density_metrics"]["overall_linf"]
+        has_v = "velocity_metrics" in rep
+        v_mse_str = f"{rep['velocity_metrics']['overall_mse']:.5e}" if has_v else "N/A"
+        v_linf_str = f"{rep['velocity_metrics']['overall_linf']:.5e}" if has_v else "N/A"
+
+        print(f"{label:<28} | {rho_mse:.5e} | {rho_linf:.5e} | {v_mse_str:<11} | {v_linf_str:<11}")
+
+        json_summary[label] = {
+            "pred_path": pred_dir,
+            "density_metrics": rep["density_metrics"],
+            "velocity_metrics": rep.get("velocity_metrics", None)
+        }
+
+    print("=" * 78 + "\n")
+
+    if args.plot:
+        plot_comparisons(reports, labels, args.plot_dir)
+
+    if args.out:
+        with open(args.out, "w") as fp:
+            json.dump(json_summary, fp, indent=2)
+        print(f"Comparison summary saved to {args.out}")
+
+
+if __name__ == "__main__":
+    main()

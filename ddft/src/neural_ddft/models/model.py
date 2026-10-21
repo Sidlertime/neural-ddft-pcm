@@ -25,8 +25,13 @@ class SuperadiabaticNet(nn.Module):
         nn.init.zeros_(self.net[-1].bias)
 
     def forward(self, rho, v):
-        # rho and v come in as shape (Batch, X)
-        # We stack them into (Batch, 2, X)
+        # Ensure inputs have shape (Batch, X)
+        if rho.dim() == 3:
+            rho = rho.squeeze(1)
+        if v.dim() == 3:
+            v = v.squeeze(1)
+
+        # We stack them into (Batch, 2, X) for Conv1d
         x = torch.stack([rho, v], dim=1)
         f_sup = self.net(x)
         return f_sup.squeeze(1) # Return shape (Batch, X)

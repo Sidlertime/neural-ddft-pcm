@@ -21,16 +21,16 @@ def get_equilibrium_force(rho_grid, base_model, dx, device):
 def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device):
     f_eq, dFdrho_grid = get_equilibrium_force(rho_grid, base_model, dx, device)
 
-    rho_pt = rho_grid.values.native('batch,x').unsqueeze(1).float().to(device)
-    v_pt = v_grid.values.vector['x'].native('batch,x').unsqueeze(1).float().to(device)
+    rho_pt = rho_grid.values.native('batch,x').float().to(device)
+    v_pt = v_grid.values.vector['x'].native('batch,x').float().to(device)
     
     if sup_model.training:
-        f_sup_val = sup_model(rho_pt, v_pt).squeeze(1)
+        f_sup_val = sup_model(rho_pt, v_pt)
     else:
         with torch.no_grad():
-            f_sup_val = sup_model(rho_pt, v_pt).squeeze(1)
+            f_sup_val = sup_model(rho_pt, v_pt)
 
-    f_sup = StaggeredGrid(math.tensor(f_sup_pred, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+    f_sup = StaggeredGrid(math.tensor(f_sup_val, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
     return f_eq + f_sup, dFdrho_grid
 
 def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
