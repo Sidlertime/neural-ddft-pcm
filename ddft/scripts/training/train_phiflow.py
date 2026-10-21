@@ -40,7 +40,7 @@ PARAM_SCHEME = {
     
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
-    "loss_weight_v": (float, 1.0),              # Balance between density loss and velocity loss
+    "loss_weight_v": (float, 5.0),              # Balance between density loss and velocity loss
     "curriculum": (list, [
         {"epochs": 15, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
         {"epochs": 20, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
