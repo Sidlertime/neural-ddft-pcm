@@ -8,7 +8,12 @@ class PhiFlowDDFT:
     def __init__(self, models: dict, device, dx, config: dict):
         self.device = device
         self.dx = dx
-        self.models = models
+        self.models = {}
+        for name, model in models.items():
+            if isinstance(model, torch.nn.Module):
+                self.models[name] = model.to(self.device)
+            else:
+                self.models[name] = model
 
         mode = config.get("model_mode", "hybrid")
         if mode not in FORCE_MODES:
@@ -20,12 +25,26 @@ class PhiFlowDDFT:
         self.eta = float(config.get("eta", 0.01))
         self.kBT = float(config.get("k", 1.0)) * float(config.get("T", 2.0))
 
+    def _ensure_device(self, grid):
+        if grid is None:
+            return None
+        native_tensor = grid.values.native(grid.values.shape)
+        if hasattr(native_tensor, 'device') and native_tensor.device != self.device:
+            native_tensor = native_tensor.to(self.device)
+            return grid.with_values(math.tensor(native_tensor, grid.values.shape))
+        return grid
+
     def step(self, rho, v, dt, V_ext, alpha=1):
         """
         Performs one integration step of the DDFT equations.
         rho: CenteredGrid
         v: StaggeredGrid
         """
+        # Guarantee all input grids reside on self.device
+        rho = self._ensure_device(rho)
+        v = self._ensure_device(v)
+        V_ext = self._ensure_device(V_ext)
+
         # ==========================================
         # EQUATION 1: ∂ρ/∂t = -∇(ρv)
         # ==========================================

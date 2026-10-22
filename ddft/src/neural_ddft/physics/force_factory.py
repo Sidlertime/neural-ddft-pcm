@@ -4,25 +4,44 @@ from phi.torch.flow import *
 import torch.nn.functional as F
 
 def get_equilibrium_force(rho_grid, base_model, dx, device):
-    rho_pt = rho_grid.values.native('batch,x').unsqueeze(1).float().to(device).requires_grad_(True)
+    rho_pt = rho_grid.values.native(rho_grid.values.shape).float().to(device)
+
+    if rho_pt.dim() == 1:
+        rho_pt = rho_pt.unsqueeze(0)
+
+    if not rho_pt.requires_grad:
+        rho_pt = rho_pt.detach().requires_grad_(True)
+    
+    rho_input = rho_pt.unsqueeze(1)
     is_training = base_model.training
 
     with torch.enable_grad():
-        F_pred = base_model(rho_pt)
-        dFdrho = torch.autograd.grad(F_pred.sum(), rho_pt, create_graph=is_training)[0] / dx
+        F_pred = base_model(rho_input)
+        grad_out = torch.autograd.grad(F_pred.sum(), rho_pt, create_graph=is_training, allow_unused=True)[0]
+
+        if grad_out is None:
+            dFdrho_tensor = torch.zeros_like(rho_input, device=device) / dx
+        else:
+            dFdrho_tensor = grad_out / dx
 
     if not is_training:
-        dFdrho = dFdrho.detach()
+        dFdrho_tensor = dFdrho_tensor.detach()
     
-    dFdrho_grid = CenteredGrid(math.tensor(dFdrho.squeeze(1), batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+    dFdrho_tensor = dFdrho_tensor.view(rho_pt.shape[0], -1)
+    dFdrho_grid = CenteredGrid(math.tensor(dFdrho_tensor, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
     f_eq = - field.spatial_gradient(dFdrho_grid)
     return f_eq, dFdrho_grid
 
 def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device):
     f_eq, dFdrho_grid = get_equilibrium_force(rho_grid, base_model, dx, device)
 
-    rho_pt = rho_grid.values.native('batch,x').float().to(device)
-    v_pt = v_grid.values.vector['x'].native('batch,x').float().to(device)
+    rho_pt = rho_grid.values.native(rho_grid.values.shape).float().to(device)
+    v_pt = v_grid.values.vector['x'].native(v_grid.values.vector['x'].shape).float().to(device)
+
+    if rho_pt.dim() == 1: 
+        rho_pt = rho_pt.unsqueeze(0)
+    if v_pt.dim() == 1: 
+        v_pt = v_pt.unsqueeze(0)
     
     if sup_model.training:
         f_sup_val = sup_model(rho_pt, v_pt)
@@ -35,9 +54,13 @@ def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device):
 
 def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
     """ Wrapped Zimmermann Superadiabatic Force """
+    rho = rho_grid.values.native(rho_grid.values.shape).float().to(device)
+    v_z = v_grid.values.vector['x'].native(v_grid.values.vector['x'].shape).float().to(device)
 
-    rho = rho_grid.values.native('batch,x').float().to(device)
-    v_z = v_grid.values.vector['x'].native('batch,x').float().to(device)
+    if rho.dim() == 1: 
+        rho = rho.unsqueeze(0)
+    if v_z.dim() == 1: 
+        v_z = v_z.unsqueeze(0)
     
     # Create the 4-channel input [rho, v_x, v_y, v_z]
     # The network expects all three velocity components, so we pad x and y with zeros.

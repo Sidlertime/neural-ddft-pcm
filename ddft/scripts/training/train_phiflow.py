@@ -17,7 +17,7 @@ from neural_ddft.data.dataset import MDWindowDataset
 from neural_ddft.models.model import SuperadiabaticNet
 from neural_ddft.models.zimmermann_net import ZimmermannNet
 from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
-from neural_ddft.physics.force_factory import FORCE_MODES
+from neural_ddft.physics.force_factory import FORCE_MODES, get_equilibrium_force
 
 # ==========================================
 # Configuration Scheme
@@ -42,16 +42,16 @@ PARAM_SCHEME = {
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
     "loss_weight_v": (float, 5.0),              # Balance between density loss and velocity loss
     "curriculum": (list, [
-        {"epochs": 15, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
-        {"epochs": 20, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
-        {"epochs": 25, "window_size": 25, "batch_size": 1,  "lr": 1e-4, "stride": 10},
+        {"epochs": 20, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
+        {"epochs": 25, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
+        {"epochs": 30, "window_size": 25, "batch_size": 1,  "lr": 1e-4, "stride": 10},
     ])
 }
 
 # ==========================================
 # PhiFlow Differentiable PDE Step
 # ==========================================
-def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, config, alpha=1.0):
+def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, config, alpha=5.0):
     """
     Performs one explicit integration step with computational graph intact.
     """
@@ -102,9 +102,9 @@ def main():
     os.makedirs(ckpt_dir, exist_ok=True)
     save_config(args, run_dir)
 
-    # Initialize CSV logger
+    # Initialize CSV logger with force ratio tracking
     csv_log_path = os.path.join(run_dir, "training_log.csv")
-    csv_headers = ["epoch", "phase", "window_size", "batch_size", "lr", "loss_total", "loss_rho", "loss_v"]
+    csv_headers = ["epoch", "phase", "window_size", "batch_size", "lr", "loss_total", "loss_rho", "loss_v", "force_ratio"]
     with open(csv_log_path, mode="w", newline="") as f_csv:
         writer = csv.writer(f_csv)
         writer.writerow(csv_headers)
@@ -203,6 +203,7 @@ def main():
             epoch_loss = 0.0
             epoch_loss_rho = 0.0
             epoch_loss_v = 0.0
+            epoch_force_ratio = 0.0
             num_batches = 0
 
             with tqdm(dataloader, desc=f"Epoch {global_epoch:03d} (Phase {phase_idx+1})", unit="batch") as pbar:
@@ -227,6 +228,7 @@ def main():
                     loss = torch.tensor(0.0, device=device)
                     batch_loss_rho = torch.tensor(0.0, device=device)
                     batch_loss_v = torch.tensor(0.0, device=device)
+                    batch_force_ratio = torch.tensor(0.0, device=device)
 
                     # Unroll trajectory through the PDE
                     for step_idx in range(1, window_size + 1):
@@ -249,6 +251,26 @@ def main():
 
                         loss = loss + loss_rho_step + (args["loss_weight_v"] * loss_v_step)
 
+                        # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode
+                        if mode == "hybrid":
+                            try:
+                                # 1. Pass the PhiFlow Grid directly to get_equilibrium_force
+                                f_eq_grid, _ = get_equilibrium_force(rho_next, models["base"], dx, device)
+                                f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
+
+                                # 2. Compute sup_force tensor
+                                rho_pt = rho_next.values.native(rho_next.values.shape).float()
+                                v_pt = v_next.values.vector['x'].native(v_next.values.vector['x'].shape).float()
+                                f_sup_tensor = models["sup"](rho_pt, v_pt)
+
+                                # 3. Calculate ratio
+                                norm_eq = torch.norm(f_eq_tensor) + 1e-8
+                                norm_sup = torch.norm(f_sup_tensor)
+                                ratio_step = (norm_sup / norm_eq).detach()
+                                batch_force_ratio = batch_force_ratio + ratio_step
+                            except Exception as e:
+                                print(f"Ratio calculation failed: {e}")
+
                         rho_current = rho_next
                         v_current = v_next
 
@@ -261,6 +283,7 @@ def main():
                     epoch_loss += loss.item()
                     epoch_loss_rho += batch_loss_rho.item()
                     epoch_loss_v += batch_loss_v.item()
+                    epoch_force_ratio += (batch_force_ratio.item() / window_size) if mode == "hybrid" else 0.0
                     num_batches += 1
 
                     pbar.set_postfix(
@@ -273,12 +296,13 @@ def main():
             avg_loss = epoch_loss / n_denom
             avg_rho = epoch_loss_rho / n_denom
             avg_v = epoch_loss_v / n_denom
-            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f}")
+            avg_ratio = epoch_force_ratio / max(num_batches, 1)
+            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}")
 
             # Append to CSV logger
             with open(csv_log_path, mode="a", newline="") as f_csv:
                 writer = csv.writer(f_csv)
-                writer.writerow([global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}"])
+                writer.writerow([global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}", f"{avg_ratio:.6e}"])
 
             # Save checkpoint per epoch or on final phase step
             if global_epoch % 5 == 0 or ep == epochs - 1:
