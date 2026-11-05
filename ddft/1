@@ -1,0 +1,77 @@
+Successfully loaded base model weights from models/c2_dz32.ckpt
+Training zimmermann model:
+
+Epoch 0 | Loss: 0.086105 | Grad Norm: 6.84e-03
+Epoch 1 | Loss: 0.086128 | Grad Norm: 1.15e-02
+Epoch 2 | Loss: 0.086099 | Grad Norm: 7.00e-04
+Epoch 3 | Loss: 0.086103 | Grad Norm: 2.39e-04
+Epoch 4 | Loss: 0.086104 | Grad Norm: 1.11e-04
+Epoch 5 | Loss: 0.086104 | Grad Norm: 6.73e-05
+Epoch 6 | Loss: 0.086103 | Grad Norm: 4.80e-05
+Epoch 7 | Loss: 0.086103 | Grad Norm: 3.76e-05
+Epoch 8 | Loss: 0.086102 | Grad Norm: 3.11e-05
+Epoch 9 | Loss: 0.086102 | Grad Norm: 2.65e-05
+Epoch 10 | Loss: 0.086101 | Grad Norm: 2.30e-05
+Epoch 11 | Loss: 0.086101 | Grad Norm: 2.00e-05
+Epoch 12 | Loss: 0.086100 | Grad Norm: 1.74e-05
+Epoch 13 | Loss: 0.086099 | Grad Norm: 1.51e-05
+Epoch 14 | Loss: 0.086099 | Grad Norm: 1.30e-05
+Epoch 15 | Loss: 0.086098 | Grad Norm: 1.11e-05
+Epoch 16 | Loss: 0.086098 | Grad Norm: 9.43e-06
+Epoch 17 | Loss: 0.086097 | Grad Norm: 7.97e-06
+Epoch 18 | Loss: 0.086097 | Grad Norm: 6.71e-06
+Epoch 19 | Loss: 0.086096 | Grad Norm: 5.63e-06
+Epoch 20 | Loss: 0.086096 | Grad Norm: 4.71e-06
+Epoch 21 | Loss: 0.086096 | Grad Norm: 3.94e-06
+Epoch 22 | Loss: 0.086095 | Grad Norm: 3.30e-06
+Epoch 23 | Loss: 0.086095 | Grad Norm: 2.76e-06
+Epoch 24 | Loss: 0.086095 | Grad Norm: 2.32e-06
+Epoch 25 | Loss: 0.086094 | Grad Norm: 1.95e-06
+Epoch 26 | Loss: 0.086094 | Grad Norm: 1.64e-06
+Epoch 27 | Loss: 0.086094 | Grad Norm: 1.39e-06
+Epoch 28 | Loss: 0.086094 | Grad Norm: 1.18e-06
+Epoch 29 | Loss: 0.086094 | Grad Norm: 1.01e-06
+Epoch 30 | Loss: 0.086093 | Grad Norm: 8.63e-07
+Epoch 31 | Loss: 0.086093 | Grad Norm: 7.41e-07
+Epoch 32 | Loss: 0.086093 | Grad Norm: 6.39e-07
+Epoch 33 | Loss: 0.086093 | Grad Norm: 5.53e-07
+Epoch 34 | Loss: 0.086093 | Grad Norm: 4.81e-07
+Epoch 35 | Loss: 0.086093 | Grad Norm: 4.20e-07
+Epoch 36 | Loss: 0.086093 | Grad Norm: 3.67e-07
+Epoch 37 | Loss: 0.086093 | Grad Norm: 3.23e-07
+Epoch 38 | Loss: 0.086093 | Grad Norm: 2.85e-07
+Epoch 39 | Loss: 0.086093 | Grad Norm: 2.53e-07
+Epoch 40 | Loss: 0.086093 | Grad Norm: 2.25e-07
+Epoch 41 | Loss: 0.086093 | Grad Norm: 2.02e-07
+Epoch 42 | Loss: 0.086093 | Grad Norm: 1.82e-07
+Epoch 43 | Loss: 0.086093 | Grad Norm: 1.64e-07
+Epoch 44 | Loss: 0.086093 | Grad Norm: 1.49e-07
+Epoch 45 | Loss: 0.086093 | Grad Norm: 1.37e-07
+Epoch 46 | Loss: 0.086093 | Grad Norm: 1.26e-07
+Epoch 47 | Loss: 0.086093 | Grad Norm: 1.17e-07
+Epoch 48 | Loss: 0.086093 | Grad Norm: 1.09e-07
+Traceback (most recent call last):
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/scripts/training/overfit_test.py", line 170, in <module>
+    main()
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/scripts/training/overfit_test.py", line 138, in main
+    rho_next, v_next = pde_step(rho_current, v_current, dt, V_ext_grid,
+                       ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/scripts/training/train_phiflow.py", line 85, in pde_step
+    f_int, _ = compute_internal_force(rho_next, v, models, dx, device)
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/src/neural_ddft/physics/force_factory.py", line 106, in <lambda>
+    "zimmermann":  lambda rho, v, models, dx, dev: get_zimmermann_force(rho, v, models['base'], models['zimmermann'], dx, dev)
+                                                   ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/src/neural_ddft/physics/force_factory.py", line 97, in get_zimmermann_force
+    f_eq, dFdrho_grid = get_equilibrium_force(rho_grid, base_model, dx, device)
+                        ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/idp/neural-ddft-pcm/ddft/src/neural_ddft/physics/force_factory.py", line 20, in get_equilibrium_force
+    grad_out = torch.autograd.grad(F_pred.sum(), rho_pt, create_graph=is_training, allow_unused=True)[0]
+               ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/micromamba/envs/neural-ddft/lib/python3.12/site-packages/torch/autograd/__init__.py", line 532, in grad
+    result = _engine_run_backward(
+             ^^^^^^^^^^^^^^^^^^^^^
+  File "/home/stud/sije/micromamba/envs/neural-ddft/lib/python3.12/site-packages/torch/autograd/graph.py", line 869, in _engine_run_backward
+    return Variable._execution_engine.run_backward(  # Calls into the C++ engine to run the backward pass
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+KeyboardInterrupt

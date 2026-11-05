@@ -14,6 +14,9 @@ class ZimmermannNet(nn.Module):
         self.fc1 = nn.Linear(4544, 100, bias=True)
         self.fc2 = nn.Linear(100, 3, bias=True)
 
+        nn.init.normal_(self.fc2.weight, mean=0.0, std=1e-2)
+        nn.init.zeros_(self.fc2.bias)
+
     def _pad_same_conv(self, x):
         # Keras 'same' with kernel 20 pads (left=9, right=10)
         return F.pad(x, (9, 10), mode='constant', value=0.0)

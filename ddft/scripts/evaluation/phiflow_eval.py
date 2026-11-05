@@ -56,11 +56,28 @@ if __name__ == "__main__":
     # 3. Load Models
     models = {}
 
+    # Initialize base model architecture from original checkpoint, then load fine-tuned weights if applicable
     if int(1/dx) == 100:
-        models["base"] = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
+        base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
     else:
-        models["base"] = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
-    models["base"].eval()
+        base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
+
+    try:
+        ckpt_data = torch.load(args["base_model_path"], map_location=device)
+        if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
+            base_model.load_state_dict(ckpt_data["state_dict"])
+        elif isinstance(ckpt_data, dict):
+            base_model.load_state_dict(ckpt_data)
+        print(f"Successfully loaded base model weights from {args['base_model_path']}")
+    except Exception as e:
+        if args["base_model_path"] != "models/c2_dz32.ckpt":
+            print(f"Warning: Could not load state dict from {args['base_model_path']} ({e}), falling back to direct load_from_checkpoint.")
+            if int(1/dx) == 100:
+                base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
+            else:
+                base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
+    base_model.eval()
+    models["base"] = base_model
 
     if args['model_mode'] == "hybrid":
         models['sup'] = SuperadiabaticNet(channels=16).to(device)

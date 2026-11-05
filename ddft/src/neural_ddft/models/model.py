@@ -8,7 +8,7 @@ class SuperadiabaticNet(nn.Module):
         # Input has 2 channels: [Density, Velocity]
         self.net = nn.Sequential(
             # Using padding_mode='circular' mathematically guarantees periodic boundary conditions!
-            nn.Conv1d(2, channels, kernel_size=5, padding=2, padding_mode='circular'),
+            nn.Conv1d(4, channels, kernel_size=5, padding=2, padding_mode='circular'),
             nn.Mish(), # Mish or Swish are infinitely smooth, perfect for PDEs
             nn.Conv1d(channels, channels, kernel_size=5, padding=2, padding_mode='circular'),
             nn.Mish(),
@@ -21,17 +21,21 @@ class SuperadiabaticNet(nn.Module):
         # Initialize output weights to zero! 
         # This ensures that at Epoch 0, F_sup is exactly 0.0, 
         # so the simulation starts as pure, uncorrupted equilibrium DDFT.
-        nn.init.zeros_(self.net[-1].weight)
+        nn.init.normal_(self.net[-1].weight, mean=0.0, std=1e-2)
         nn.init.zeros_(self.net[-1].bias)
 
-    def forward(self, rho, v):
+    def forward(self, rho, v, grad_rho, grad_v):
         # Ensure inputs have shape (Batch, X)
         if rho.dim() == 3:
             rho = rho.squeeze(1)
         if v.dim() == 3:
             v = v.squeeze(1)
+        if grad_rho.dim() == 3: 
+            grad_rho = grad_rho.squeeze(1)
+        if grad_v.dim() == 3: 
+            grad_v = grad_v.squeeze(1)
 
         # We stack them into (Batch, 2, X) for Conv1d
-        x = torch.stack([rho, v], dim=1)
+        x = torch.stack([rho, v, grad_rho, grad_v], dim=1)
         f_sup = self.net(x)
         return f_sup.squeeze(1) # Return shape (Batch, X)

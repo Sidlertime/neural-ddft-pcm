@@ -3,7 +3,7 @@ from neural_ddft.utils.functions import plot_movie_multiple
 if __name__ == "__main__":
     # output name
     output_path = "ddft_plots/comparison_solver_updated"
-    output_path = "results/2026-09-28_zimmermann_hybrid_trained_01"
+    output_path = "results/2026-10-23_eval_finetuned_equilibrium_01"
     # put md paths + names in here [("path/to/md1", "name1"), ...]
     md_configs = [
         #("../data/lj_data/2026-01-22_lj_nvt_01/avg_500", "NVT, Tdamp=10")
@@ -13,7 +13,7 @@ if __name__ == "__main__":
     ]
     # put ddft and paths + names in here [("path/to/ddft1", "name1"), ...]
     ddft_configs = [
-        ("results/2026-09-28_zimmermann_hybrid_trained_01", "DDFT")
+        ("results/2026-10-23_eval_finetuned_equilibrium_01", "DDFT")
         #("results/2026-09-21_phiflow_pretrained_01", "PhiFlow Pretrained (gamma=0.1, eta=0.67)")
         #,("results/2026-09-21_phiflow_pft_01", "PhiFlow PFT (gamma=0.1, eta=0.67)")
         #,("results/2026-09-21_phiflow_zimmermann_01", "PhiFlow Zimmermann (gamma=0.1, eta=0.67)")

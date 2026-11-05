@@ -42,12 +42,17 @@ def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device):
         rho_pt = rho_pt.unsqueeze(0)
     if v_pt.dim() == 1: 
         v_pt = v_pt.unsqueeze(0)
+        
+    # Calculate gradients using PyTorch central differences (Periodic Boundary Conditions)
+    # torch.roll(..., -1) shifts left (i+1), torch.roll(..., 1) shifts right (i-1)
+    grad_rho_pt = (torch.roll(rho_pt, shifts=-1, dims=-1) - torch.roll(rho_pt, shifts=1, dims=-1)) / (2 * dx)
+    grad_v_pt = (torch.roll(v_pt, shifts=-1, dims=-1) - torch.roll(v_pt, shifts=1, dims=-1)) / (2 * dx)
     
     if sup_model.training:
-        f_sup_val = sup_model(rho_pt, v_pt)
+        f_sup_val = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt)
     else:
         with torch.no_grad():
-            f_sup_val = sup_model(rho_pt, v_pt)
+            f_sup_val = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt)
 
     f_sup = StaggeredGrid(math.tensor(f_sup_val, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
     return f_eq + f_sup, dFdrho_grid

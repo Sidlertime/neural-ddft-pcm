@@ -8,7 +8,7 @@ import numpy as np
 import h5py
 from datetime import datetime
 from tqdm import tqdm
-from torch.utils.data import DataLoader
+from torch.utils.data import DataLoader, Subset, SubsetRandomSampler
 from phi.torch.flow import *
 
 # Package imports
@@ -40,11 +40,27 @@ PARAM_SCHEME = {
     
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
-    "loss_weight_v": (float, 5.0),              # Balance between density loss and velocity loss
+    "loss_weight_v": (float, 10.0),              # Balance between density loss and velocity loss
+    "noise_std": (float, 1e-2),                  # Gaussian noise standard deviation for input perturbation (scheduled sampling / robustness)
     "curriculum": (list, [
-        {"epochs": 20, "window_size": 3, "batch_size": 8, "lr": 1e-3, "stride": 2},
-        {"epochs": 25, "window_size": 10, "batch_size": 4,  "lr": 5e-4, "stride": 4},
-        {"epochs": 30, "window_size": 25, "batch_size": 1,  "lr": 1e-4, "stride": 10},
+        # one step prediction
+        {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
+        {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
+        {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
+        {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
+        {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
+        # small window
+        {"epochs": 10, "window_size": 5,  "batch_size": 8, "lr": 5e-4, "stride": 2},
+        {"epochs": 10, "window_size": 5,  "batch_size": 8, "lr": 5e-4, "stride": 2},
+        {"epochs": 10, "window_size": 5,  "batch_size": 8, "lr": 5e-4, "stride": 2},
+        {"epochs": 10, "window_size": 5,  "batch_size": 8, "lr": 5e-4, "stride": 2},
+        # medium horizon
+        {"epochs": 10, "window_size": 15, "batch_size": 4, "lr": 2e-4, "stride": 6},
+        {"epochs": 10, "window_size": 15, "batch_size": 4, "lr": 2e-4, "stride": 6},
+        {"epochs": 10, "window_size": 15, "batch_size": 4, "lr": 2e-4, "stride": 6},
+        # extended horizon
+        {"epochs": 10, "window_size": 35, "batch_size": 1, "lr": 1e-4, "stride": 15},
+        {"epochs": 10, "window_size": 35, "batch_size": 1, "lr": 1e-4, "stride": 15},
     ])
 }
 
@@ -128,34 +144,74 @@ def main():
     trainable_params = []
     mode = args["model_mode"]
 
+    # Load base model robustly supporting raw state dict checkpoints as well as lightning checkpoints
     if int(1 / dx) == 100:
-        base_model = NeuralFreeEnergyFine.load_from_checkpoint(args["base_model_path"], map_location=device)
+        base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
     else:
-        base_model = NeuralFreeEnergy.load_from_checkpoint(args["base_model_path"], map_location=device)
+        base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
+
+    try:
+        ckpt_data = torch.load(args["base_model_path"], map_location=device)
+        if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
+            base_model.load_state_dict(ckpt_data["state_dict"])
+        elif isinstance(ckpt_data, dict):
+            base_model.load_state_dict(ckpt_data)
+        print(f"Successfully loaded base model weights from {args['base_model_path']}")
+    except Exception as e:
+        if args["base_model_path"] != "models/c2_dz32.ckpt":
+            print(f"Warning: Could not load state dict from {args['base_model_path']} ({e}), falling back to direct load_from_checkpoint.")
+            if int(1/dx) == 100:
+                base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
+            else:
+                base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
     base_model.to(device)
-    models["base"] = base_model
 
     if mode == "equilibrium":
         base_model.train()
+        # Freeze all parameters first
         for p in base_model.parameters(): 
+            p.requires_grad = False
+
+        # Unfreeze ONLY the final layer
+        # If NeuralFreeEnergy uses a Sequential block named 'net' ending in Conv1d/Linear
+        final_layer = list(base_model.children())[-1] 
+        if isinstance(final_layer, nn.Sequential):
+            final_layer = final_layer[-1]
+            
+        for p in final_layer.parameters():
             p.requires_grad = True
-        trainable_params.extend(base_model.parameters())
+            trainable_params.append(p)
+            
+        print("Equilibrium mode: Froze feature extractors. Fine-tuning ONLY the final layer.")
     else:
         base_model.eval()
         for p in base_model.parameters(): 
             p.requires_grad = False
+    models["base"] = base_model
 
     if mode == "hybrid":
         sup_model = SuperadiabaticNet(channels=16).to(device)
         if args["sup_model_path"]:
-            sup_model.load_state_dict(torch.load(args["sup_model_path"], map_location=device))
+            sup_ckpt = torch.load(args["sup_model_path"], map_location=device)
+            if isinstance(sup_ckpt, dict) and "state_dict" in sup_ckpt:
+                sup_model.load_state_dict(sup_ckpt["state_dict"])
+            elif isinstance(sup_ckpt, dict):
+                sup_model.load_state_dict(sup_ckpt)
+            else:
+                sup_model.load_state_dict(sup_ckpt)
         sup_model.train()
         trainable_params.extend(sup_model.parameters())
         models["sup"] = sup_model
     elif mode == "zimmermann":
         z_model = ZimmermannNet().to(device)
         if args["zimmermann_model_path"]:
-            z_model.load_state_dict(torch.load(args["zimmermann_model_path"], map_location=device))
+            z_ckpt = torch.load(args["zimmermann_model_path"], map_location=device)
+            if isinstance(z_ckpt, dict) and "state_dict" in z_ckpt:
+                z_model.load_state_dict(z_ckpt["state_dict"])
+            elif isinstance(z_ckpt, dict):
+                z_model.load_state_dict(z_ckpt)
+            else:
+                z_model.load_state_dict(z_ckpt)
         z_model.train()
         trainable_params.extend(z_model.parameters())
         models["zimmermann"] = z_model
@@ -168,12 +224,15 @@ def main():
         print(f"No trainable parameters found for mode '{mode}'. Exiting.")
         return
 
-    weight_decay = float(args.get("weight_decay", 1e-4))
-    optimizer = torch.optim.Adam(trainable_params, lr=1e-3, weight_decay=weight_decay)
+    base_weight_decay = float(args.get("weight_decay", 1e-4))
+    base_loss_weight_v = float(args.get("loss_weight_v", 5.0))
+    base_noise_std = float(args.get("noise_std", 0.0))
+
+    optimizer = torch.optim.Adam(trainable_params, lr=1e-3, weight_decay=base_weight_decay)
     global_epoch = 0
 
     print(f"\nStarting training for mode: {mode}")
-    print(f"gamma={args['gamma']} | eta={args['eta']} | weight_decay={weight_decay} | loss_weight_v={args['loss_weight_v']}")
+    print(f"gamma={args['gamma']} | eta={args['eta']} | base_weight_decay={base_weight_decay} | base_loss_weight_v={base_loss_weight_v}")
     print(f"Log CSV saved to: {csv_log_path}")
     print(f"Checkpoints will be saved to: {ckpt_dir}\n")
 
@@ -186,17 +245,34 @@ def main():
         batch_size = int(phase["batch_size"])
         lr = float(phase["lr"])
         stride = int(phase.get("stride", 1))
+        
+        # Allow per-phase parameter overrides
+        phase_weight_decay = float(phase.get("weight_decay", base_weight_decay))
+        phase_loss_weight_v = float(phase.get("loss_weight_v", base_loss_weight_v))
+        phase_noise_std = float(phase.get("noise_std", base_noise_std))
 
         print(f"\n{'='*60}")
-        print(f"--- Phase {phase_idx+1}/{len(args['curriculum'])}: Window Size={window_size}, Batch={batch_size}, LR={lr} ---")
+        print(f"--- Phase {phase_idx+1}/{len(args['curriculum'])}: Window Size={window_size}, Batch={batch_size}, LR={lr}, LossW_V={phase_loss_weight_v}, Noise={phase_noise_std} ---")
         print(f"{'='*60}")
 
-        # Update learning rate
+        # Update learning rate and weight decay
         for param_group in optimizer.param_groups:
             param_group['lr'] = lr
+            param_group['weight_decay'] = phase_weight_decay
 
-        dataset = MDWindowDataset(md_path=args["md_path"], window_size=window_size, stride=stride, sigma_smooth=3.0)
-        dataloader = DataLoader(dataset, batch_size=batch_size, shuffle=True, drop_last=True)
+        full_dataset = MDWindowDataset(md_path=args["md_path"], window_size=window_size, stride=stride, sigma_smooth=3.0)
+        
+        # Define the continuous chunk size (e.g., 15% of the trajectory)
+        chunk_size = max(1, int(0.15 * len(full_dataset)))
+        max_start_idx = max(0, len(full_dataset) - chunk_size)
+
+        # Randomly select the starting point for this PHASE
+        start_idx = np.random.randint(0, max_start_idx + 1)
+        phase_indices = list(range(start_idx, start_idx + chunk_size))
+        phase_subset = Subset(full_dataset, phase_indices)
+        
+        # Initialize DataLoader for this phase's specific chunk
+        dataloader = DataLoader(phase_subset, batch_size=batch_size, shuffle=True, drop_last=True)
 
         for ep in range(epochs):
             global_epoch += 1
@@ -213,6 +289,12 @@ def main():
                     # batch['rho'] and batch['v'] shape: (B, window_size + 1, spatial_res)
                     rho_batch = batch_data['rho'].to(device)
                     v_batch = batch_data['v'].to(device)
+                    
+                    # Optional noise injection for robustness against autoregressive exposure bias
+                    if phase_noise_std > 0.0:
+                        rho_batch = rho_batch + torch.randn_like(rho_batch) * phase_noise_std
+                        rho_batch = torch.clamp(rho_batch, min=1e-6)
+
                     B = rho_batch.shape[0]
 
                     # Initial conditions (step 0 of window)
@@ -249,25 +331,28 @@ def main():
                         batch_loss_rho = batch_loss_rho + loss_rho_step
                         batch_loss_v = batch_loss_v + loss_v_step
 
-                        loss = loss + loss_rho_step + (args["loss_weight_v"] * loss_v_step)
+                        loss = loss + loss_rho_step + (phase_loss_weight_v * loss_v_step)
 
                         # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode
                         if mode == "hybrid":
                             try:
-                                # 1. Pass the PhiFlow Grid directly to get_equilibrium_force
                                 f_eq_grid, _ = get_equilibrium_force(rho_next, models["base"], dx, device)
                                 f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
 
-                                # 2. Compute sup_force tensor
                                 rho_pt = rho_next.values.native(rho_next.values.shape).float()
                                 v_pt = v_next.values.vector['x'].native(v_next.values.vector['x'].shape).float()
-                                f_sup_tensor = models["sup"](rho_pt, v_pt)
+                                grad_rho_pt = (torch.roll(rho_pt, shifts=-1, dims=-1) - torch.roll(rho_pt, shifts=1, dims=-1)) / (2 * dx)
+                                grad_v_pt = (torch.roll(v_pt, shifts=-1, dims=-1) - torch.roll(v_pt, shifts=1, dims=-1)) / (2 * dx)
+                                f_sup_tensor = models["sup"](rho_pt, v_pt, grad_rho_pt, grad_v_pt)
 
-                                # 3. Calculate ratio
                                 norm_eq = torch.norm(f_eq_tensor) + 1e-8
                                 norm_sup = torch.norm(f_sup_tensor)
                                 ratio_step = (norm_sup / norm_eq).detach()
                                 batch_force_ratio = batch_force_ratio + ratio_step
+
+                                # add regularization to network not overdominate force term (only tiny corrections)
+                                force_penalty = torch.mean(f_sup_tensor ** 2)
+                                loss = loss + (1e-4 * force_penalty)
                             except Exception as e:
                                 print(f"Ratio calculation failed: {e}")
 
@@ -280,10 +365,10 @@ def main():
                     torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
 
-                    epoch_loss += loss.item()
-                    epoch_loss_rho += batch_loss_rho.item()
-                    epoch_loss_v += batch_loss_v.item()
-                    epoch_force_ratio += (batch_force_ratio.item() / window_size) if mode == "hybrid" else 0.0
+                    epoch_loss += loss.detach().item()
+                    epoch_loss_rho += batch_loss_rho.detach().item()
+                    epoch_loss_v += batch_loss_v.detach().item()
+                    epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode == "hybrid" else 0.0
                     num_batches += 1
 
                     pbar.set_postfix(

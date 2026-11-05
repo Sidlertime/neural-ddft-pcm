@@ -229,7 +229,8 @@ def plot_comparisons(reports, labels, output_dir):
         # Density column
         axes[row_idx, 0].plot(r_coord, first_rep["t_rho"][frame_idx], "k--", label="Reference", lw=2)
         for rep, label in zip(reports, labels):
-            axes[row_idx, 0].plot(r_coord, rep["p_rho"][frame_idx], label=label, alpha=0.85)
+            idx = min(frame_idx, len(rep["p_rho"])-1)
+            axes[row_idx, 0].plot(r_coord, rep["p_rho"][idx], label=label, alpha=0.85)
         axes[row_idx, 0].set_ylabel(f"t={t_val:.3f}\nDensity $\\rho$")
         axes[row_idx, 0].grid(True, linestyle=":", alpha=0.6)
         if row_idx == 0:
@@ -241,7 +242,8 @@ def plot_comparisons(reports, labels, output_dir):
             axes[row_idx, 1].plot(r_coord, first_rep["t_v"][frame_idx], "k--", label="Reference", lw=2)
             for rep, label in zip(reports, labels):
                 if rep["p_v"] is not None:
-                    axes[row_idx, 1].plot(r_coord, rep["p_v"][frame_idx], label=label, alpha=0.85)
+                    idx = min(frame_idx, len(rep["p_v"])-1)
+                    axes[row_idx, 1].plot(r_coord, rep["p_v"][idx], label=label, alpha=0.85)
             axes[row_idx, 1].set_ylabel(f"Velocity $v_z$")
             axes[row_idx, 1].grid(True, linestyle=":", alpha=0.6)
             if row_idx == 0:
