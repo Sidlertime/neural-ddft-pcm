@@ -8,8 +8,8 @@ if __name__ == "__main__":
     md_configs = [
         #("../data/lj_data/2026-01-22_lj_nvt_01/avg_500", "NVT, Tdamp=10")
         #,("../data/lj_data/2026-02-05_lj_nve_01/avg_500", "NVE")
-        #("../data/lj_data/2026-01-21_lj_langevin_01/avg_500", "MD (Langevin+NVE, Tdamp=10)")
-        ("../data/lj_data/2026-01-21_lj_langevin_01/avg_500", "MD")
+        #("../data/lj_data/ref_gaussian_langevin_01/avg_500", "MD (Langevin+NVE, Tdamp=10)")
+        ("../data/lj_data/ref_gaussian_langevin_01/avg_500", "MD")
     ]
     # put ddft and paths + names in here [("path/to/ddft1", "name1"), ...]
     ddft_configs = [

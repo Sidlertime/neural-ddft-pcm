@@ -1,4 +1,5 @@
 import glob
+import os
 import h5py
 import numpy as np
 import torch
@@ -59,3 +60,85 @@ class MDWindowDataset(Dataset):
             'rho': self.rho_traj[start : start + self.window_size + 1],
             'v': self.v_traj[start : start + self.window_size + 1]
         }
+
+
+class MultiPotentialMDDataset(Dataset):
+    """
+    Combines per-potential MDWindowDataset instances (e.g. a Gaussian well and
+    several Karnik reference potentials) into a single indexable dataset.
+
+    Every sample is tagged with its originating potential index ('potential_id')
+    so the training loop can look up the correct external potential V_ext and,
+    via `phase_chunk_indices`, select one continuous trajectory chunk PER
+    POTENTIAL rather than a single chunk spanning the whole concatenation
+    (chunk boundaries must never straddle two different potentials' data).
+    """
+
+    @staticmethod
+    def _assert_consistent_grid(names, datasets):
+        ref_name, ref = names[0], datasets[0]
+        for name, ds in zip(names[1:], datasets[1:]):
+            if (ds.domain_resolution != ref.domain_resolution
+                    or not np.isclose(ds.box_length, ref.box_length)
+                    or not np.isclose(ds.dr, ref.dr)):
+                raise ValueError(
+                    f"Potential '{name}' grid (res={ds.domain_resolution}, "
+                    f"box={ds.box_length}, dr={ds.dr}) does not match reference "
+                    f"potential '{ref_name}' (res={ref.domain_resolution}, "
+                    f"box={ref.box_length}, dr={ref.dr}). All potentials in a mixed "
+                    "dataset must share the same spatial grid."
+                )
+
+    def __init__(self, md_paths, window_size, stride=1, sigma_smooth=1.5):
+        if isinstance(md_paths, str):
+            md_paths = [md_paths]
+        if len(md_paths) == 0:
+            raise ValueError("md_paths must contain at least one MD directory")
+
+        self.potential_names = [os.path.basename(os.path.normpath(p)) for p in md_paths]
+        self.datasets = [
+            MDWindowDataset(p, window_size, stride=stride, sigma_smooth=sigma_smooth)
+            for p in md_paths
+        ]
+
+        self._assert_consistent_grid(self.potential_names, self.datasets)
+
+        ref = self.datasets[0]
+        self.domain_resolution = ref.domain_resolution
+        self.box_length = ref.box_length
+        self.dr = ref.dr
+        # Shape: (n_potentials, domain_resolution) - indexed per-sample via 'potential_id'
+        self.V_ext = torch.stack([ds.V_ext for ds in self.datasets])
+
+        self._lengths = [len(ds) for ds in self.datasets]
+        self._offsets = np.cumsum([0] + self._lengths[:-1])
+
+    def __len__(self):
+        return sum(self._lengths)
+
+    def _locate(self, idx):
+        pot_idx = int(np.searchsorted(self._offsets, idx, side='right') - 1)
+        local_idx = idx - self._offsets[pot_idx]
+        return pot_idx, int(local_idx)
+
+    def __getitem__(self, idx):
+        pot_idx, local_idx = self._locate(idx)
+        item = self.datasets[pot_idx][local_idx]
+        item['potential_id'] = pot_idx
+        return item
+
+    def phase_chunk_indices(self, chunk_fraction, rng=None):
+        """
+        Picks one random continuous chunk per potential (scoped to that
+        potential's own trajectory, preserving the "Continuous Multi-Start
+        Shifting Chunks" training strategy) and returns their combined
+        global indices into this dataset.
+        """
+        rng = rng if rng is not None else np.random
+        indices = []
+        for pot_idx, length in enumerate(self._lengths):
+            chunk_size = max(1, int(chunk_fraction * length))
+            max_start = max(0, length - chunk_size)
+            start = int(rng.randint(0, max_start + 1))
+            indices.extend(int(self._offsets[pot_idx]) + np.arange(start, start + chunk_size))
+        return indices

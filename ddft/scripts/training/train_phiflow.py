@@ -13,19 +13,20 @@ from phi.torch.flow import *
 
 # Package imports
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
-from neural_ddft.data.dataset import MDWindowDataset
-from neural_ddft.models.model import SuperadiabaticNet
-from neural_ddft.models.zimmermann_net import ZimmermannNet
-from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
-from neural_ddft.physics.force_factory import FORCE_MODES, get_equilibrium_force
+from neural_ddft.data.dataset import MultiPotentialMDDataset
+from neural_ddft.models.factory import build_models, MODEL_KEY_BY_MODE
+from neural_ddft.physics.force_factory import FORCE_MODES
 
 # ==========================================
 # Configuration Scheme
 # ==========================================
 PARAM_SCHEME = {
     "run_id": (str, "train"),
+    "seed": (int, 42),                          # Controls chunk-start sampling and DataLoader shuffling
     "model_mode": (str, "hybrid"),              # "equilibrium", "hybrid", or "zimmermann"
-    "md_path": (str, "../data/lj_data/2026-01-21_lj_langevin_01/avg_500/"),
+    # One or more MD directories. Each becomes one "potential" in the mixed
+    # training set; all must share the same spatial grid (asserted at load time).
+    "md_paths": (list, ["../data/lj_data/ref_gaussian_langevin_01/avg_500/"]),
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
@@ -96,17 +97,19 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
     vext_term = - (1.0 / m) * field.spatial_gradient(V_ext)
 
     # Dynamic internal force from selected model
-    f_int, _ = compute_internal_force(rho_next, v, models, dx, device)
+    f_int, _, force_components = compute_internal_force(rho_next, v, models, dx, device)
 
     v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + (f_int * alpha / m))
 
-    return rho_next, v_next
+    return rho_next, v_next, force_components
 
 # ==========================================
 # Main Training Function
 # ==========================================
 def main():
     args = load_config(PARAM_SCHEME, description="Unified Neural DDFT Training Loop")
+    torch.manual_seed(args["seed"])
+    np.random.seed(args["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using compute device: {device}")
 
@@ -125,96 +128,28 @@ def main():
         writer = csv.writer(f_csv)
         writer.writerow(csv_headers)
 
-    # Load Spatial Domain Dimensions from MD files
-    md_file_list = sorted(glob.glob(f"{args['md_path']}/collection.*.h5"))
+    # Load Spatial Domain Dimensions from the first MD potential's files.
+    # (All potentials must share this grid - MultiPotentialMDDataset asserts it below.)
+    md_file_list = sorted(glob.glob(f"{args['md_paths'][0]}/collection.*.h5"))
     if not md_file_list:
-        raise FileNotFoundError(f"No collection files found in {args['md_path']}")
-        
+        raise FileNotFoundError(f"No collection files found in {args['md_paths'][0]}")
+
     with h5py.File(md_file_list[0], 'r') as f:
-        V_np = np.array(f['V']).flatten()
         r_np = np.array(f['r']).flatten()
 
     box_length = float(r_np[-1] - r_np[0])
     domain_res = r_np.shape[0]
     dx = box_length / domain_res
-    V_ext_grid = CenteredGrid(math.tensor(V_np, spatial('x')), extrapolation.PERIODIC, x=domain_res, bounds=Box(x=box_length))
 
     # Initialize Models Dictionary
-    models = {}
-    trainable_params = []
     mode = args["model_mode"]
-
-    # Load base model robustly supporting raw state dict checkpoints as well as lightning checkpoints
-    if int(1 / dx) == 100:
-        base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
-    else:
-        base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
-
-    try:
-        ckpt_data = torch.load(args["base_model_path"], map_location=device)
-        if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
-            base_model.load_state_dict(ckpt_data["state_dict"])
-        elif isinstance(ckpt_data, dict):
-            base_model.load_state_dict(ckpt_data)
-        print(f"Successfully loaded base model weights from {args['base_model_path']}")
-    except Exception as e:
-        if args["base_model_path"] != "models/c2_dz32.ckpt":
-            print(f"Warning: Could not load state dict from {args['base_model_path']} ({e}), falling back to direct load_from_checkpoint.")
-            if int(1/dx) == 100:
-                base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
-            else:
-                base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
-    base_model.to(device)
-
-    if mode == "equilibrium":
-        base_model.train()
-        # Freeze all parameters first
-        for p in base_model.parameters(): 
-            p.requires_grad = False
-
-        # Unfreeze ONLY the final layer
-        # If NeuralFreeEnergy uses a Sequential block named 'net' ending in Conv1d/Linear
-        final_layer = list(base_model.children())[-1] 
-        if isinstance(final_layer, nn.Sequential):
-            final_layer = final_layer[-1]
-            
-        for p in final_layer.parameters():
-            p.requires_grad = True
-            trainable_params.append(p)
-            
-        print("Equilibrium mode: Froze feature extractors. Fine-tuning ONLY the final layer.")
-    else:
-        base_model.eval()
-        for p in base_model.parameters(): 
-            p.requires_grad = False
-    models["base"] = base_model
-
-    if mode == "hybrid":
-        sup_model = SuperadiabaticNet(channels=16).to(device)
-        if args["sup_model_path"]:
-            sup_ckpt = torch.load(args["sup_model_path"], map_location=device)
-            if isinstance(sup_ckpt, dict) and "state_dict" in sup_ckpt:
-                sup_model.load_state_dict(sup_ckpt["state_dict"])
-            elif isinstance(sup_ckpt, dict):
-                sup_model.load_state_dict(sup_ckpt)
-            else:
-                sup_model.load_state_dict(sup_ckpt)
-        sup_model.train()
-        trainable_params.extend(sup_model.parameters())
-        models["sup"] = sup_model
-    elif mode == "zimmermann":
-        z_model = ZimmermannNet().to(device)
-        if args["zimmermann_model_path"]:
-            z_ckpt = torch.load(args["zimmermann_model_path"], map_location=device)
-            if isinstance(z_ckpt, dict) and "state_dict" in z_ckpt:
-                z_model.load_state_dict(z_ckpt["state_dict"])
-            elif isinstance(z_ckpt, dict):
-                z_model.load_state_dict(z_ckpt)
-            else:
-                z_model.load_state_dict(z_ckpt)
-        z_model.train()
-        trainable_params.extend(z_model.parameters())
-        models["zimmermann"] = z_model
+    models, trainable_params = build_models(
+        mode=mode, device=device, dx=dx,
+        base_model_path=args["base_model_path"],
+        sup_model_path=args["sup_model_path"],
+        zimmermann_model_path=args["zimmermann_model_path"],
+        trainable=True,
+    )
 
     compute_internal_force = FORCE_MODES[mode]
     criterion = nn.MSELoss()
@@ -260,17 +195,13 @@ def main():
             param_group['lr'] = lr
             param_group['weight_decay'] = phase_weight_decay
 
-        full_dataset = MDWindowDataset(md_path=args["md_path"], window_size=window_size, stride=stride, sigma_smooth=3.0)
-        
-        # Define the continuous chunk size (e.g., 15% of the trajectory)
-        chunk_size = max(1, int(0.15 * len(full_dataset)))
-        max_start_idx = max(0, len(full_dataset) - chunk_size)
+        full_dataset = MultiPotentialMDDataset(md_paths=args["md_paths"], window_size=window_size, stride=stride, sigma_smooth=3.0)
 
-        # Randomly select the starting point for this PHASE
-        start_idx = np.random.randint(0, max_start_idx + 1)
-        phase_indices = list(range(start_idx, start_idx + chunk_size))
+        # Pick one continuous 15% chunk PER POTENTIAL for this phase (never a
+        # chunk spanning two potentials), then combine them into one subset.
+        phase_indices = full_dataset.phase_chunk_indices(chunk_fraction=0.15)
         phase_subset = Subset(full_dataset, phase_indices)
-        
+
         # Initialize DataLoader for this phase's specific chunk
         dataloader = DataLoader(phase_subset, batch_size=batch_size, shuffle=True, drop_last=True)
 
@@ -289,7 +220,15 @@ def main():
                     # batch['rho'] and batch['v'] shape: (B, window_size + 1, spatial_res)
                     rho_batch = batch_data['rho'].to(device)
                     v_batch = batch_data['v'].to(device)
-                    
+
+                    # Each sample carries its own external potential V_ext, since
+                    # a mixed batch can contain samples from different potentials.
+                    V_ext_batch = full_dataset.V_ext[batch_data['potential_id']].to(device)
+                    V_ext_grid = CenteredGrid(
+                        math.tensor(V_ext_batch, batch('batch'), spatial('x')),
+                        extrapolation.PERIODIC, bounds=Box(x=box_length)
+                    )
+
                     # Optional noise injection for robustness against autoregressive exposure bias
                     if phase_noise_std > 0.0:
                         rho_batch = rho_batch + torch.randn_like(rho_batch) * phase_noise_std
@@ -314,7 +253,7 @@ def main():
 
                     # Unroll trajectory through the PDE
                     for step_idx in range(1, window_size + 1):
-                        rho_next, v_next = pde_step(
+                        rho_next, v_next, force_components = pde_step(
                             rho_current, v_current, args["dt"], V_ext_grid,
                             compute_internal_force, models, dx, device, args
                         )
@@ -333,28 +272,23 @@ def main():
 
                         loss = loss + loss_rho_step + (phase_loss_weight_v * loss_v_step)
 
-                        # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode
+                        # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode.
+                        # Reuses the f_eq/f_sup already computed inside pde_step's internal
+                        # compute_internal_force call - no second base/sup model forward pass.
                         if mode == "hybrid":
-                            try:
-                                f_eq_grid, _ = get_equilibrium_force(rho_next, models["base"], dx, device)
-                                f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
+                            f_eq_grid = force_components["f_eq"]
+                            f_sup_grid = force_components["f_sup"]
+                            f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
+                            f_sup_tensor = f_sup_grid.values.vector['x'].native(f_sup_grid.values.vector['x'].shape)
 
-                                rho_pt = rho_next.values.native(rho_next.values.shape).float()
-                                v_pt = v_next.values.vector['x'].native(v_next.values.vector['x'].shape).float()
-                                grad_rho_pt = (torch.roll(rho_pt, shifts=-1, dims=-1) - torch.roll(rho_pt, shifts=1, dims=-1)) / (2 * dx)
-                                grad_v_pt = (torch.roll(v_pt, shifts=-1, dims=-1) - torch.roll(v_pt, shifts=1, dims=-1)) / (2 * dx)
-                                f_sup_tensor = models["sup"](rho_pt, v_pt, grad_rho_pt, grad_v_pt)
+                            norm_eq = torch.norm(f_eq_tensor) + 1e-8
+                            norm_sup = torch.norm(f_sup_tensor)
+                            ratio_step = (norm_sup / norm_eq).detach()
+                            batch_force_ratio = batch_force_ratio + ratio_step
 
-                                norm_eq = torch.norm(f_eq_tensor) + 1e-8
-                                norm_sup = torch.norm(f_sup_tensor)
-                                ratio_step = (norm_sup / norm_eq).detach()
-                                batch_force_ratio = batch_force_ratio + ratio_step
-
-                                # add regularization to network not overdominate force term (only tiny corrections)
-                                force_penalty = torch.mean(f_sup_tensor ** 2)
-                                loss = loss + (1e-4 * force_penalty)
-                            except Exception as e:
-                                print(f"Ratio calculation failed: {e}")
+                            # add regularization to network not overdominate force term (only tiny corrections)
+                            force_penalty = torch.mean(f_sup_tensor ** 2)
+                            loss = loss + (1e-4 * force_penalty)
 
                         rho_current = rho_next
                         v_current = v_next
@@ -392,7 +326,7 @@ def main():
             # Save checkpoint per epoch or on final phase step
             if global_epoch % 5 == 0 or ep == epochs - 1:
                 ckpt_path = os.path.join(ckpt_dir, f"{mode}_epoch_{global_epoch:03d}.ckpt")
-                active_model = models[{"equilibrium":"base","hybrid":"sup","zimmermann":"zimmermann"}[mode]]
+                active_model = models[MODEL_KEY_BY_MODE[mode]]
                 torch.save(active_model.state_dict(), ckpt_path)
 
     print(f"\nTraining complete. All checkpoints saved in {ckpt_dir}")

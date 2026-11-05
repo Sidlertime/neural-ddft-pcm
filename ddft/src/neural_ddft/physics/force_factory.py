@@ -55,7 +55,7 @@ def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device):
             f_sup_val = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt)
 
     f_sup = StaggeredGrid(math.tensor(f_sup_val, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
-    return f_eq + f_sup, dFdrho_grid
+    return f_eq + f_sup, dFdrho_grid, {"f_eq": f_eq, "f_sup": f_sup}
 
 def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
     """ Wrapped Zimmermann Superadiabatic Force """
@@ -97,11 +97,15 @@ def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
     f_eq, dFdrho_grid = get_equilibrium_force(rho_grid, base_model, dx, device)
     f_total = f_eq + f_zimmermann_grid
 
-    return f_total, dFdrho_grid
+    return f_total, dFdrho_grid, {"f_eq": f_eq, "f_zimmermann": f_zimmermann_grid}
 
 # The Dispatcher Dictionary
+# Every mode returns (f_total, dFdrho_grid, force_components), where
+# force_components is a dict of the individual force contributions (e.g.
+# 'f_eq'/'f_sup') so callers needing them (e.g. force-ratio logging) can
+# reuse values already computed here instead of recomputing a second forward pass.
 FORCE_MODES = {
-    "equilibrium": lambda rho, v, models, dx, dev: get_equilibrium_force(rho, models['base'], dx, dev),
+    "equilibrium": lambda rho, v, models, dx, dev: (*get_equilibrium_force(rho, models['base'], dx, dev), {}),
     "hybrid":      lambda rho, v, models, dx, dev: get_hybrid_force(rho, v, models['base'], models['sup'], dx, dev),
     "zimmermann":  lambda rho, v, models, dx, dev: get_zimmermann_force(rho, v, models['base'], models['zimmermann'], dx, dev)
 }

@@ -1,29 +1,36 @@
 import argparse
 import json
 import os
+import yaml
+
+def _load_config_file(path):
+    """Loads a JSON or YAML config file based on its extension."""
+    with open(path, 'r') as f:
+        if path.endswith('.yaml') or path.endswith('.yml'):
+            return yaml.safe_load(f) or {}
+        return json.load(f)
 
 def load_config(param_scheme, description="Neural DDFT Script"):
     """
-    Parses CLI arguments and merges them with a JSON config file.
-    CLI arguments always take priority over JSON.
+    Parses CLI arguments and merges them with a JSON or YAML config file.
+    CLI arguments always take priority over the config file.
     """
     parser = argparse.ArgumentParser(description=description)
-    parser.add_argument("--config", type=str, help="Path to JSON config file")
-    
+    parser.add_argument("--config", type=str, help="Path to JSON or YAML config file")
+
     for name, (arg_type, default) in param_scheme.items():
         if arg_type not in [list, dict]:
             if arg_type is bool:
                 parser.add_argument(f"--{name}", action="store_true")
             else:
                 parser.add_argument(f"--{name}", type=arg_type)
-            
+
     args = parser.parse_args()
-    
+
     config_data = {}
     if args.config and os.path.exists(args.config):
-        with open(args.config, 'r') as f:
-            config_data = json.load(f)
-            
+        config_data = _load_config_file(args.config)
+
     final_args = {}
     for name, (arg_type, default) in param_scheme.items():
         if arg_type in [list, dict]:

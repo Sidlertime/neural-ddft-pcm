@@ -90,7 +90,7 @@ class PhiFlowDDFT:
         vext_term = - (1.0 / self.m) * field.spatial_gradient(V_ext)
         
         # Internal Force based on Excess Free Energy: - (1/m) ∇(δF_exc/δρ)
-        f_int, _ = self.compute_internal_force(rho_next, v, self.models, self.dx, self.device)
+        f_int, _, _ = self.compute_internal_force(rho_next, v, self.models, self.dx, self.device)
         
         # Combine all explicit forces to update velocity
         v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + f_int * alpha / self.m)
@@ -98,7 +98,7 @@ class PhiFlowDDFT:
         return rho_next, v_next
 
     def save_state(self, rho, v, V_ext, current_time, results_path):
-        f_total, dFdrho_grid = self.compute_internal_force(rho, v, self.models, self.dx, self.device)
+        f_total, dFdrho_grid, _force_components = self.compute_internal_force(rho, v, self.models, self.dx, self.device)
 
         rho_data = rho.values.native('batch,x')[0].cpu().detach().numpy()
         v_data = v.values.vector['x'].native('batch,x')[0].cpu().detach().numpy()

@@ -9,15 +9,13 @@ from phi.torch.flow import *
 
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 from neural_ddft.utils.functions import plot_movie
-from neural_ddft.models.model import SuperadiabaticNet
-from neural_ddft.models.zimmermann_net import ZimmermannNet
-from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
+from neural_ddft.models.factory import build_models
 from neural_ddft.physics.phiflow_pde import PhiFlowDDFT
 
 PARAM_SCHEME = {
     "run_id": (str, "phiflow_eval"),
     #"md_path": (str, "../data/g1-closed-dz100/avg_5000"),
-    "md_path": (str, "../data/lj_data/2026-01-21_lj_langevin_01/avg_500/"),
+    "md_path": (str, "../data/lj_data/ref_gaussian_langevin_01/avg_500/"),
     "ref_md_path": (str, None),
     "model_mode": (str, "hybrid"),              # "equilibrium", "hybrid", or "zimmermann"
     "base_model_path": (str, "models/c2_dz32.ckpt"),
@@ -53,42 +51,14 @@ if __name__ == "__main__":
     dx = box_length / domain_res
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-    # 3. Load Models
-    models = {}
-
-    # Initialize base model architecture from original checkpoint, then load fine-tuned weights if applicable
-    if int(1/dx) == 100:
-        base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
-    else:
-        base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path="models/c2_dz32.ckpt", map_location=device)
-
-    try:
-        ckpt_data = torch.load(args["base_model_path"], map_location=device)
-        if isinstance(ckpt_data, dict) and "state_dict" in ckpt_data:
-            base_model.load_state_dict(ckpt_data["state_dict"])
-        elif isinstance(ckpt_data, dict):
-            base_model.load_state_dict(ckpt_data)
-        print(f"Successfully loaded base model weights from {args['base_model_path']}")
-    except Exception as e:
-        if args["base_model_path"] != "models/c2_dz32.ckpt":
-            print(f"Warning: Could not load state dict from {args['base_model_path']} ({e}), falling back to direct load_from_checkpoint.")
-            if int(1/dx) == 100:
-                base_model = NeuralFreeEnergyFine.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
-            else:
-                base_model = NeuralFreeEnergy.load_from_checkpoint(checkpoint_path=args["base_model_path"], map_location=device)
-    base_model.eval()
-    models["base"] = base_model
-
-    if args['model_mode'] == "hybrid":
-        models['sup'] = SuperadiabaticNet(channels=16).to(device)
-        if args['sup_model_path']:
-            models['sup'].load_state_dict(torch.load(args["sup_model_path"], map_location=device))
-        models['sup'].eval()
-    elif args['model_mode'] == "zimmermann":
-        models["zimmermann"] = ZimmermannNet().to(device)
-        if args['zimmermann_model_path']:
-            models["zimmermann"].load_state_dict(torch.load(args['zimmermann_model_path'], map_location=device))
-        models["zimmermann"].eval()
+    # 3. Load Models (frozen/eval - this is an evaluation script, nothing trains here)
+    models, _ = build_models(
+        mode=args['model_mode'], device=device, dx=dx,
+        base_model_path=args["base_model_path"],
+        sup_model_path=args["sup_model_path"],
+        zimmermann_model_path=args["zimmermann_model_path"],
+        trainable=False,
+    )
 
     # 4. Initialize PhiFlow Grids & Solver
     rho = CenteredGrid(math.tensor(init_rho, spatial('x')), extrapolation.PERIODIC, x=domain_res, bounds=Box(x=box_length))

@@ -21,10 +21,10 @@ ETA="0.6944"
 
 # Target Data Arrays
 MD_DIRECTORIES=(
-    "../data/lj_data/2026-10-23_ref_sim_3a_langevin_01/avg_2000" 
-    "../data/lj_data/2026-10-24_ref_sim_3b_langevin_01/avg_2000" 
-    "../data/lj_data/2026-10-24_ref_sim_3c_langevin_01/avg_2000" 
-    "../data/lj_data/2026-10-24_ref_sim_3d_langevin_01/avg_2000"
+    "../data/lj_data/ref_3a_langevin_01/avg_2000"
+    "../data/lj_data/ref_3b_langevin_01/avg_2000"
+    "../data/lj_data/ref_3c_langevin_01/avg_2000"
+    "../data/lj_data/ref_3d_langevin_01/avg_2000"
 )
 RUN_IDS=("ref_3a" "ref_3b" "ref_3c" "ref_3d")
 #MODES=("equilibrium" "hybrid" "zimmermann")
