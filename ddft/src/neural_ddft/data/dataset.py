@@ -62,6 +62,23 @@ class MDWindowDataset(Dataset):
         }
 
 
+def potential_name_from_path(path):
+    """
+    Derives a human-readable potential identifier from an MD data path.
+    Data is conventionally laid out as <potential_dir>/<avg_subfolder>/collection.*.h5
+    (e.g. "ref_3a_langevin_01/avg_2000/") - the trailing "avg_*" subfolder is shared
+    across many potentials (e.g. all of ref_3a-3d use "avg_2000"), so prefer the
+    parent directory name when the immediate basename looks like such a subfolder.
+    """
+    norm = os.path.normpath(path)
+    base = os.path.basename(norm)
+    if base.startswith("avg_"):
+        parent = os.path.dirname(norm)
+        if parent:
+            return os.path.basename(parent)
+    return base
+
+
 class MultiPotentialMDDataset(Dataset):
     """
     Combines per-potential MDWindowDataset instances (e.g. a Gaussian well and
@@ -95,7 +112,7 @@ class MultiPotentialMDDataset(Dataset):
         if len(md_paths) == 0:
             raise ValueError("md_paths must contain at least one MD directory")
 
-        self.potential_names = [os.path.basename(os.path.normpath(p)) for p in md_paths]
+        self.potential_names = [potential_name_from_path(p) for p in md_paths]
         self.datasets = [
             MDWindowDataset(p, window_size, stride=stride, sigma_smooth=sigma_smooth)
             for p in md_paths

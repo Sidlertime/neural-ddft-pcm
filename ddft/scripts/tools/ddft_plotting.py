@@ -30,4 +30,4 @@ if __name__ == "__main__":
         #,("../../goddard/results/2026-03-26_lj_psm_scaled_sin+linear_k1_T2_m1_g0.1_eta0.1_dt0.0001_c2", "PSM scaled (gamma=0.1, eta=0.1)")
     ]
 
-    plot_movie_multiple(output_path, ddft_configs, md_configs, True)
+    plot_movie_multiple(output_path, ddft_configs, md_configs, force_panel="components", dfdrho_panel=False)

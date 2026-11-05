@@ -4,6 +4,7 @@ import json
 import csv
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import numpy as np
 import h5py
 from datetime import datetime
@@ -13,7 +14,7 @@ from phi.torch.flow import *
 
 # Package imports
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
-from neural_ddft.data.dataset import MultiPotentialMDDataset
+from neural_ddft.data.dataset import MultiPotentialMDDataset, potential_name_from_path
 from neural_ddft.models.factory import build_models, MODEL_KEY_BY_MODE
 from neural_ddft.physics.force_factory import FORCE_MODES
 
@@ -103,6 +104,17 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
 
     return rho_next, v_next, force_components
 
+def scatter_add_by_potential(values_per_sample, potential_ids, accumulator):
+    """
+    Adds a (B,) per-sample tensor into a (n_potentials,) numpy accumulator,
+    grouped by each sample's potential_id. Used to break down aggregate
+    training metrics by potential when a batch mixes multiple potentials.
+    """
+    for pid in potential_ids.unique():
+        mask = potential_ids == pid
+        accumulator[int(pid)] += values_per_sample[mask].sum().item()
+    return accumulator
+
 # ==========================================
 # Main Training Function
 # ==========================================
@@ -121,9 +133,16 @@ def main():
     os.makedirs(ckpt_dir, exist_ok=True)
     save_config(args, run_dir)
 
-    # Initialize CSV logger with force ratio tracking
+    # Potential names (one per md_paths entry) used to break down per-epoch
+    # metrics per potential below - plain string manipulation, matches
+    # MultiPotentialMDDataset's own naming logic, no dataset load needed.
+    potential_names = [potential_name_from_path(p) for p in args["md_paths"]]
+
+    # Initialize CSV logger with force ratio tracking (aggregate + per-potential columns)
     csv_log_path = os.path.join(run_dir, "training_log.csv")
     csv_headers = ["epoch", "phase", "window_size", "batch_size", "lr", "loss_total", "loss_rho", "loss_v", "force_ratio"]
+    for name in potential_names:
+        csv_headers += [f"loss_rho__{name}", f"loss_v__{name}", f"force_ratio__{name}", f"n_samples__{name}"]
     with open(csv_log_path, mode="w", newline="") as f_csv:
         writer = csv.writer(f_csv)
         writer.writerow(csv_headers)
@@ -213,6 +232,12 @@ def main():
             epoch_force_ratio = 0.0
             num_batches = 0
 
+            n_pot = len(potential_names)
+            epoch_loss_rho_per_pot = np.zeros(n_pot)
+            epoch_loss_v_per_pot = np.zeros(n_pot)
+            epoch_force_ratio_per_pot = np.zeros(n_pot)
+            epoch_n_samples_per_pot = np.zeros(n_pot)
+
             with tqdm(dataloader, desc=f"Epoch {global_epoch:03d} (Phase {phase_idx+1})", unit="batch") as pbar:
                 for batch_data in pbar:
                     optimizer.zero_grad()
@@ -220,6 +245,8 @@ def main():
                     # batch['rho'] and batch['v'] shape: (B, window_size + 1, spatial_res)
                     rho_batch = batch_data['rho'].to(device)
                     v_batch = batch_data['v'].to(device)
+                    potential_ids = batch_data['potential_id']
+                    epoch_n_samples_per_pot += np.bincount(potential_ids.numpy(), minlength=n_pot)
 
                     # Each sample carries its own external potential V_ext, since
                     # a mixed batch can contain samples from different potentials.
@@ -272,6 +299,14 @@ def main():
 
                         loss = loss + loss_rho_step + (phase_loss_weight_v * loss_v_step)
 
+                        # Per-sample (unreduced) losses purely for per-potential observability -
+                        # does not affect the backprop target `loss` above.
+                        with torch.no_grad():
+                            loss_rho_per_sample = F.mse_loss(pred_rho, target_rho, reduction='none').mean(dim=-1)
+                            loss_v_per_sample = F.mse_loss(pred_v, target_v, reduction='none').mean(dim=-1)
+                            scatter_add_by_potential(loss_rho_per_sample, potential_ids, epoch_loss_rho_per_pot)
+                            scatter_add_by_potential(loss_v_per_sample, potential_ids, epoch_loss_v_per_pot)
+
                         # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode.
                         # Reuses the f_eq/f_sup already computed inside pde_step's internal
                         # compute_internal_force call - no second base/sup model forward pass.
@@ -285,6 +320,10 @@ def main():
                             norm_sup = torch.norm(f_sup_tensor)
                             ratio_step = (norm_sup / norm_eq).detach()
                             batch_force_ratio = batch_force_ratio + ratio_step
+
+                            with torch.no_grad():
+                                ratio_per_sample = torch.norm(f_sup_tensor, dim=-1) / (torch.norm(f_eq_tensor, dim=-1) + 1e-8)
+                                scatter_add_by_potential(ratio_per_sample, potential_ids, epoch_force_ratio_per_pot)
 
                             # add regularization to network not overdominate force term (only tiny corrections)
                             force_penalty = torch.mean(f_sup_tensor ** 2)
@@ -316,12 +355,23 @@ def main():
             avg_rho = epoch_loss_rho / n_denom
             avg_v = epoch_loss_v / n_denom
             avg_ratio = epoch_force_ratio / max(num_batches, 1)
-            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}")
+
+            # Per-potential denominators mirror n_denom (sample count * window_size)
+            per_pot_denom = np.maximum(epoch_n_samples_per_pot * window_size, 1)
+            avg_rho_per_pot = epoch_loss_rho_per_pot / per_pot_denom
+            avg_v_per_pot = epoch_loss_v_per_pot / per_pot_denom
+            avg_ratio_per_pot = epoch_force_ratio_per_pot / per_pot_denom
+
+            ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode == "hybrid" else ""
+            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}" + (f" | PerPotentialRatio: {ratio_str}" if ratio_str else ""))
 
             # Append to CSV logger
             with open(csv_log_path, mode="a", newline="") as f_csv:
                 writer = csv.writer(f_csv)
-                writer.writerow([global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}", f"{avg_ratio:.6e}"])
+                row = [global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}", f"{avg_ratio:.6e}"]
+                for i in range(len(potential_names)):
+                    row += [f"{avg_rho_per_pot[i]:.6e}", f"{avg_v_per_pot[i]:.6e}", f"{avg_ratio_per_pot[i]:.6e}", int(epoch_n_samples_per_pot[i])]
+                writer.writerow(row)
 
             # Save checkpoint per epoch or on final phase step
             if global_epoch % 5 == 0 or ep == epochs - 1:

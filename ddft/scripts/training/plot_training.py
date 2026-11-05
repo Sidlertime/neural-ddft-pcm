@@ -15,13 +15,18 @@ def plot_training_log(csv_path):
     # Load data
     df = pd.read_csv(csv_path)
 
+    # Per-potential columns (absent in older/single-potential logs - fall back
+    # gracefully to the aggregate-only behavior below if not found).
+    potential_names = [c[len("loss_rho__"):] for c in df.columns if c.startswith("loss_rho__")]
+    pot_colors = plt.get_cmap("tab10").colors
+
     # Setup the figure
     fig, axs = plt.subplots(3, 1, figsize=(10, 12), sharex=True)
     epochs = df['epoch']
 
     # Identify phase transitions
     phase_changes = df[df['phase'].diff() != 0]['epoch'].tolist()
-    
+
     # 1. Total Loss Plot (Log Scale)
     axs[0].plot(epochs, df['loss_total'], label='Total Loss', color='black', linewidth=2)
     axs[0].set_yscale('log')
@@ -34,17 +39,30 @@ def plot_training_log(csv_path):
     axs[1].plot(epochs, df['loss_v'], label='Velocity Loss ($v$)', color='red')
     axs[1].set_yscale('log')
     axs[1].set_ylabel('Component Loss')
-    axs[1].legend()
     axs[1].grid(True, which="both", ls="-", alpha=0.2)
 
     # 3. Force Ratio (if hybrid)
     if df['force_ratio'].sum() > 0:
-        axs[2].plot(epochs, df['force_ratio'], label=r'$||F_{sup}|| / ||F_{eq}||$', color='green')
+        axs[2].plot(epochs, df['force_ratio'], label=r'$||F_{sup}|| / ||F_{eq}||$', color='green', linewidth=2)
         axs[2].set_ylabel('Force Ratio')
     else:
         axs[2].text(0.5, 0.5, 'Force Ratio Not Tracked', ha='center', va='center', transform=axs[2].transAxes)
     axs[2].set_xlabel('Global Epoch')
     axs[2].grid(True, alpha=0.2)
+
+    # Per-potential overlay: thin, lighter lines so a diverging potential is
+    # visible as an outlier even when the bold aggregate line looks fine.
+    if potential_names:
+        for i, name in enumerate(potential_names):
+            color = pot_colors[i % len(pot_colors)]
+            axs[1].plot(epochs, df[f'loss_rho__{name}'], color=color, alpha=0.6, lw=1, ls='-')
+            axs[1].plot(epochs, df[f'loss_v__{name}'], color=color, alpha=0.6, lw=1, ls='--')
+            if f'force_ratio__{name}' in df.columns and df[f'force_ratio__{name}'].sum() > 0:
+                axs[2].plot(epochs, df[f'force_ratio__{name}'], color=color, alpha=0.6, lw=1, label=name)
+
+    axs[1].legend()
+    if potential_names:
+        axs[2].legend(fontsize=8, ncol=min(len(potential_names), 4))
 
     # Draw vertical lines for curriculum phases across all subplots
     for ax in axs:

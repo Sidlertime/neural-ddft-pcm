@@ -1,4 +1,5 @@
 import os
+import time
 import torch
 import numpy as np
 import h5py
@@ -9,6 +10,8 @@ from phi.torch.flow import *
 
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 from neural_ddft.utils.functions import plot_movie
+from neural_ddft.utils.metrics import summarize_run
+from neural_ddft.utils.run_summary import write_run_summary
 from neural_ddft.models.factory import build_models
 from neural_ddft.physics.phiflow_pde import PhiFlowDDFT
 
@@ -27,6 +30,8 @@ PARAM_SCHEME = {
     "gamma": (float, 0.1),
     "eta": (float, 0.67),
     "dt": (float, 1e-4),
+    "t_range": (float, 4.0),                    # Total simulated time - lower for fast iteration (e.g. --t_range 0.5)
+    "save_interval": (float, 0.01),
 }
 
 if __name__ == "__main__":
@@ -70,25 +75,47 @@ if __name__ == "__main__":
     )
 
     # 5. The Main Physics Loop
-    t_range, save_interval, CFL, current_time, target_save = 4.0, 0.01, 0.4, 0.0, 0.01
-    
+    t_range, save_interval, CFL, current_time, target_save = args['t_range'], args['save_interval'], 0.4, 0.0, 0.01
+    step_counter = 0
+    force_ratios = []
+    blowup_info = {"occurred": False, "at_sim_time": None, "at_step": None, "reason": None}
+    start_wall_time = time.time()
+
     with tqdm(total=t_range, desc="DDFT Simulation", unit="sim_time", bar_format="{l_bar}{bar}| [{elapsed}<{remaining} {postfix}]") as pbar:
         while current_time < t_range:
             v_max = float(np.max(np.abs(v.values.vector['x'].native('batch,x').cpu().detach().numpy())))
-            if np.isnan(v_max) or np.isinf(v_max): break
-            
+            if np.isnan(v_max) or np.isinf(v_max):
+                blowup_info = {"occurred": True, "at_sim_time": current_time, "at_step": step_counter, "reason": "v_max NaN/Inf"}
+                break
+
             dt = min(CFL * dx / (v_max + 1e-6), args['dt'], t_range - current_time)
-            
+
             rho, v = solver.step(rho, v, dt, V_ext)
-            
+            step_counter += 1
+
             current_time += dt
             pbar.update(dt)
             pbar.set_postfix(dt=f"{dt:.2e}", vmax=f"{v_max:.4f}")
 
             # 6. Save State
             if current_time >= target_save or current_time >= t_range - 1e-8:
-                solver.save_state(rho, v, V_ext, current_time, results_path)
+                state_info = solver.save_state(rho, v, V_ext, current_time, results_path)
+                if state_info.get("force_ratio") is not None:
+                    force_ratios.append(state_info["force_ratio"])
                 target_save += save_interval
 
+    wall_clock_seconds = time.time() - start_wall_time
+
     print("Simulation complete! Generating movie...")
-    plot_movie(results_path, args['md_path'], args['ref_md_path'], True)
+    plot_movie(results_path, args['md_path'], args['ref_md_path'])
+
+    print("Writing run summary...")
+    ref_path = args.get('ref_md_path') or args.get('md_path')
+    reference_comparison = summarize_run(results_path, ref_path, is_ref_md=True) if ref_path else None
+    write_run_summary(
+        results_path=results_path, config=args,
+        force_ratios=force_ratios, blowup_info=blowup_info,
+        n_steps_completed=step_counter, final_sim_time=current_time,
+        wall_clock_seconds=wall_clock_seconds, reference_comparison=reference_comparison,
+    )
+    print(f"Run summary saved to {os.path.join(results_path, 'summary.json')}")

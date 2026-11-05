@@ -98,7 +98,7 @@ class PhiFlowDDFT:
         return rho_next, v_next
 
     def save_state(self, rho, v, V_ext, current_time, results_path):
-        f_total, dFdrho_grid, _force_components = self.compute_internal_force(rho, v, self.models, self.dx, self.device)
+        f_total, dFdrho_grid, force_components = self.compute_internal_force(rho, v, self.models, self.dx, self.device)
 
         rho_data = rho.values.native('batch,x')[0].cpu().detach().numpy()
         v_data = v.values.vector['x'].native('batch,x')[0].cpu().detach().numpy()
@@ -110,10 +110,26 @@ class PhiFlowDDFT:
             V_ext_np = V_ext.values.native('batch,x')[0].cpu().detach().numpy()
         else:
             V_ext_np = V_ext.values.numpy('batch,x')[0]
-        
+
         np.save(f"{results_path}/rho{current_time:06.3f}.npy", rho_data)
         np.save(f"{results_path}/v{current_time:06.3f}.npy", v_data)
         np.save(f"{results_path}/V_ext{current_time:06.3f}.npy", V_ext_np)
         np.save(f"{results_path}/dFdrho{current_time:06.3f}.npy", dFdrho_data)
         np.save(f"{results_path}/dFdrho_mod{current_time:06.3f}.npy", f_total_data)
-        #np.save(f"{results_path}/f_sup{current_time:06.3f}.npy", f_sup_data)
+
+        # Persist each force component (f_eq, and f_sup/f_zimmermann if present)
+        # separately so base/added/total can be plotted side by side.
+        force_ratio = None
+        f_eq_norm = None
+        for comp_name, comp_grid in force_components.items():
+            comp_data = comp_grid.values.vector['x'].native('batch,x')[0].cpu().detach().numpy()
+            np.save(f"{results_path}/{comp_name}{current_time:06.3f}.npy", comp_data)
+            if comp_name == "f_eq":
+                f_eq_norm = np.linalg.norm(comp_data)
+            elif comp_name in ("f_sup", "f_zimmermann"):
+                force_ratio = np.linalg.norm(comp_data)
+
+        if force_ratio is not None and f_eq_norm is not None:
+            force_ratio = float(force_ratio / (f_eq_norm + 1e-8))
+
+        return {"force_ratio": force_ratio}
