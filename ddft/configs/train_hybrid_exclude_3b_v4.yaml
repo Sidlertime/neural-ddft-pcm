@@ -1,0 +1,72 @@
+# v4: exclude-ref_3b multi-potential hybrid training with EXPANDED inputs.
+#
+# v1 (noise_std=0.01) showed near-zero contribution with small regressions.
+# v2 (noise_std=0.001, window_size=35 restored) removed the regressions but
+# still converged toward near-zero contribution rather than a real
+# improvement. v3 (v2 + a FIXED chunk, matching grad_quarter's curriculum
+# structure) reproduced grad_quarter's force_ratio GROWTH pattern during
+# training but made full-trajectory eval WORSE on all 3 trained potentials -
+# the learned correction didn't generalize safely from the short
+# window_size=35 training horizon to the much longer eval horizon.
+#
+# This version: same base as v2 (resampled chunks every phase, 12+2-phase
+# curriculum, noise_std=0.001) but SuperadiabaticNet now also takes V_ext,
+# one step of temporal history (rho_prev/v_prev, plus the derived
+# acceleration a=(v_t-v_[t-1])/dt), and gamma/eta (broadcast as constant
+# channels - these are fixed for the whole run here, so expected to carry no
+# learnable signal on their own, included only because they were explicitly
+# requested; V_ext and the temporal channels are where real signal is
+# expected). See src/neural_ddft/models/model.py:OPTIONAL_CHANNELS.
+#
+# Verified before this run: scripts/training/overfit_test.py (updated to use
+# this exact model_kwargs set) shows a real, accelerating loss decrease
+# (0.086 -> 0.022 over ~28 epochs on a single held-fixed window), and
+# tests/test_pde_rollout.py's new forward/backward tests confirm every
+# parameter (not just the last layer) receives a finite gradient.
+run_id: train_exclude_3b_v4
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_gaussian_langevin_01/avg_500/
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+  - ../data/lj_data/ref_3d_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 1.0e-4
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}

@@ -1,0 +1,50 @@
+# v3: exclude-ref_3b multi-potential hybrid training with a FIXED chunk.
+#
+# v1/v2 both resample a fresh random chunk every curriculum phase
+# (MultiPotentialMDDataset.phase_chunk_indices with no start_fraction), which
+# is itself "Continuous Multi-Start Shifting Chunks" - inspired by the one
+# proven-successful single-potential run (train_grad_quarter_hybrid_01), but
+# that run actually did the OPPOSITE: it held ONE fixed chunk - 10
+# consecutive windows starting at 40% into the trajectory - for its entire
+# 140-epoch run, never resampling. v2 (noise_std fixed, window_size=35
+# restored) still didn't reproduce the real signal; its force_ratio declined
+# through window_size=35 instead of growing, consistent with re-adapting to
+# a freshly-drawn chunk right as it reached the long-horizon regime.
+#
+# This version: chunk_start_fraction=0.4 (fixed, no resampling - see
+# phase_chunk_indices in src/neural_ddft/data/dataset.py). Since the chunk no
+# longer needs repeated phases to trigger resampling, the curriculum is also
+# collapsed to one phase per window_size with grad_quarter's exact epoch
+# counts/LRs (50/40/30/20, matching its structure as closely as possible for
+# the mixed 3-potential case).
+run_id: train_exclude_3b_v3
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_gaussian_langevin_01/avg_500/
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+  - ../data/lj_data/ref_3d_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 1.0e-4
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+chunk_fraction: 0.15
+chunk_start_fraction: 0.4
+
+curriculum:
+  - {epochs: 50, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 40, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 30, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}

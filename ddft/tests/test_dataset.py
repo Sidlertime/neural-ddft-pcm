@@ -57,6 +57,35 @@ def test_phase_chunk_indices_stays_within_one_potential():
     print("[DEBUG] test_phase_chunk_indices_stays_within_one_potential passed successfully.")
 
 
+@requires_md_data
+def test_phase_chunk_indices_start_fraction_is_fixed_and_deterministic():
+    print("\n[DEBUG] Starting test_phase_chunk_indices_start_fraction_is_fixed_and_deterministic...")
+    window_size = 5
+    combined = MultiPotentialMDDataset(
+        [GAUSSIAN_PATH, REF_3A_PATH], window_size=window_size, stride=1
+    )
+
+    # Same start_fraction, called twice with different (or no) rng - must be identical,
+    # since start_fraction bypasses the random draw entirely.
+    indices_a = combined.phase_chunk_indices(chunk_fraction=0.15, start_fraction=0.4)
+    indices_b = combined.phase_chunk_indices(chunk_fraction=0.15, start_fraction=0.4, rng=np.random.RandomState(123))
+    assert indices_a == indices_b
+
+    # Each potential's chunk must actually start at ~40% of its own length (clamped to fit).
+    offset = 0
+    for length in combined._lengths:
+        chunk_here = sorted(i - offset for i in indices_a if offset <= i < offset + length)
+        chunk_size = max(1, int(0.15 * length))
+        expected_start = min(int(0.4 * length), max(0, length - chunk_size))
+        assert chunk_here[0] == expected_start
+        offset += length
+
+    # A different start_fraction must move the chunk.
+    indices_c = combined.phase_chunk_indices(chunk_fraction=0.15, start_fraction=0.1)
+    assert indices_a != indices_c
+    print("[DEBUG] test_phase_chunk_indices_start_fraction_is_fixed_and_deterministic passed successfully.")
+
+
 def test_assert_consistent_grid_rejects_mismatched_potentials():
     print("\n[DEBUG] Starting test_assert_consistent_grid_rejects_mismatched_potentials...")
     ref = SimpleNamespace(domain_resolution=320, box_length=9.96875, dr=0.03115)

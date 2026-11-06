@@ -16,6 +16,7 @@ from phi.torch.flow import *
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 from neural_ddft.data.dataset import MultiPotentialMDDataset, potential_name_from_path
 from neural_ddft.models.factory import build_models, MODEL_KEY_BY_MODE
+from neural_ddft.models.model import OPTIONAL_CHANNELS
 from neural_ddft.physics.force_factory import FORCE_MODES
 
 # ==========================================
@@ -31,7 +32,10 @@ PARAM_SCHEME = {
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
-    
+    # Optional extra input channels for SuperadiabaticNet (hybrid mode only),
+    # e.g. {"use_vext": true, "use_accel": true} - see models/model.py:OPTIONAL_CHANNELS.
+    "model_kwargs": (dict, {}),
+
     # Physics parameters
     "k": (float, 1.0),
     "T": (float, 2.0),
@@ -44,6 +48,8 @@ PARAM_SCHEME = {
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
     "loss_weight_v": (float, 10.0),              # Balance between density loss and velocity loss
     "noise_std": (float, 1e-2),                  # Gaussian noise standard deviation for input perturbation (scheduled sampling / robustness)
+    "chunk_fraction": (float, 0.15),             # Size of each phase's per-potential training chunk, as a fraction of that phase's dataset length
+    "chunk_start_fraction": (float, None),       # If set, every phase's chunk starts at this same fixed fraction of the trajectory (no resampling) - mirrors the one proven-successful single-potential run, which held one fixed chunk for its entire training. If None (default), a fresh random chunk is drawn each phase ("Continuous Multi-Start Shifting Chunks").
     "curriculum": (list, [
         # one step prediction
         {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
@@ -69,9 +75,13 @@ PARAM_SCHEME = {
 # ==========================================
 # PhiFlow Differentiable PDE Step
 # ==========================================
-def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, config, alpha=5.0):
+def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, config,
+             rho_prev=None, v_prev=None, alpha=5.0):
     """
     Performs one explicit integration step with computational graph intact.
+    rho_prev/v_prev: the state from one step earlier within this window's
+        unroll (None for the first step) - only used by sup_models configured
+        with use_rho_prev/use_v_prev/use_accel.
     """
     m = config["m"]
     gamma = config["gamma"]
@@ -98,7 +108,11 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
     vext_term = - (1.0 / m) * field.spatial_gradient(V_ext)
 
     # Dynamic internal force from selected model
-    f_int, _, force_components = compute_internal_force(rho_next, v, models, dx, device)
+    f_int, _, force_components = compute_internal_force(
+        rho_next, v, models, dx, device,
+        V_ext_grid=V_ext, rho_prev_grid=rho_prev, v_prev_grid=v_prev, dt=dt,
+        gamma=gamma, eta=eta,
+    )
 
     v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + (f_int * alpha / m))
 
@@ -169,6 +183,7 @@ def main():
         sup_model_path=args["sup_model_path"],
         zimmermann_model_path=args["zimmermann_model_path"],
         trainable=True,
+        sup_model_kwargs=args.get("model_kwargs", {}),
     )
 
     compute_internal_force = FORCE_MODES[mode]
@@ -217,9 +232,13 @@ def main():
 
         full_dataset = MultiPotentialMDDataset(md_paths=args["md_paths"], window_size=window_size, stride=stride, sigma_smooth=3.0)
 
-        # Pick one continuous 15% chunk PER POTENTIAL for this phase (never a
-        # chunk spanning two potentials), then combine them into one subset.
-        phase_indices = full_dataset.phase_chunk_indices(chunk_fraction=0.15)
+        # Pick one continuous chunk PER POTENTIAL for this phase (never a chunk
+        # spanning two potentials), then combine them into one subset. If
+        # chunk_start_fraction is set, every phase uses the same fixed region
+        # (no resampling); otherwise a fresh random chunk is drawn each phase.
+        phase_indices = full_dataset.phase_chunk_indices(
+            chunk_fraction=args["chunk_fraction"], start_fraction=args.get("chunk_start_fraction")
+        )
         phase_subset = Subset(full_dataset, phase_indices)
 
         # Initialize DataLoader for this phase's specific chunk
@@ -280,12 +299,15 @@ def main():
                     batch_loss_v = torch.tensor(0.0, device=device)
                     batch_force_ratio = torch.tensor(0.0, device=device)
                     batch_is_nan = False
+                    # None for the first step - no history available yet within this window.
+                    rho_prev_track, v_prev_track = None, None
 
                     # Unroll trajectory through the PDE
                     for step_idx in range(1, window_size + 1):
                         rho_next, v_next, force_components = pde_step(
                             rho_current, v_current, args["dt"], V_ext_grid,
-                            compute_internal_force, models, dx, device, args
+                            compute_internal_force, models, dx, device, args,
+                            rho_prev=rho_prev_track, v_prev=v_prev_track,
                         )
 
                         pred_rho = rho_next.values.native('batch,x')
@@ -339,6 +361,7 @@ def main():
                             force_penalty = torch.mean(f_sup_tensor ** 2)
                             loss = loss + (1e-4 * force_penalty)
 
+                        rho_prev_track, v_prev_track = rho_current, v_current
                         rho_current = rho_next
                         v_current = v_next
 
@@ -399,7 +422,15 @@ def main():
             if global_epoch % 5 == 0 or ep == epochs - 1:
                 ckpt_path = os.path.join(ckpt_dir, f"{mode}_epoch_{global_epoch:03d}.ckpt")
                 active_model = models[MODEL_KEY_BY_MODE[mode]]
-                torch.save(active_model.state_dict(), ckpt_path)
+                if hasattr(active_model, OPTIONAL_CHANNELS[0]):
+                    # SuperadiabaticNet - persist its input-channel flags alongside
+                    # the weights so a future load can verify they match (see
+                    # models/factory.py:_load_correction_checkpoint).
+                    ckpt_payload = {"state_dict": active_model.state_dict()}
+                    ckpt_payload.update({flag: getattr(active_model, flag) for flag in OPTIONAL_CHANNELS})
+                    torch.save(ckpt_payload, ckpt_path)
+                else:
+                    torch.save(active_model.state_dict(), ckpt_path)
 
     print(f"\nTraining complete. All checkpoints saved in {ckpt_dir}")
     print(f"Training log written to {csv_log_path}")

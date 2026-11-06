@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from neural_ddft.models.model import SuperadiabaticNet
+from neural_ddft.models.model import SuperadiabaticNet, OPTIONAL_CHANNELS
 from neural_ddft.models.zimmermann_net import ZimmermannNet
 from neural_ddft.models.neural_free_energy import NeuralFreeEnergy, NeuralFreeEnergyFine
 
@@ -37,12 +37,27 @@ def _load_correction_checkpoint(model, ckpt_path, device):
     if not ckpt_path:
         return
     ckpt = torch.load(ckpt_path, map_location=device)
-    state_dict = ckpt["state_dict"] if isinstance(ckpt, dict) and "state_dict" in ckpt else ckpt
+    if isinstance(ckpt, dict) and "state_dict" in ckpt:
+        # Checkpoints saved since the optional-input-channel feature carry their
+        # use_* flags alongside the weights - verify they match this model
+        # instance before loading, so a channel-count mismatch is reported with
+        # a clear reason instead of either a cryptic shape error or (worse) a
+        # silent misload if the channel counts happen to coincide.
+        for flag in OPTIONAL_CHANNELS:
+            if flag in ckpt and getattr(model, flag, False) != ckpt[flag]:
+                raise ValueError(
+                    f"Checkpoint '{ckpt_path}' was trained with {flag}={ckpt[flag]} "
+                    f"but the model was instantiated with {flag}={getattr(model, flag, False)}."
+                )
+        state_dict = ckpt["state_dict"]
+    else:
+        state_dict = ckpt
     model.load_state_dict(state_dict)
 
 
 def build_models(mode, device, dx, base_model_path=BASE_CHECKPOINT_PATH,
-                  sup_model_path=None, zimmermann_model_path=None, trainable=True):
+                  sup_model_path=None, zimmermann_model_path=None, trainable=True,
+                  sup_model_kwargs=None):
     """
     Builds the {'base', 'sup'|'zimmermann'} model dict and the list of
     trainable parameters for a given force mode ("equilibrium"/"hybrid"/"zimmermann").
@@ -50,6 +65,8 @@ def build_models(mode, device, dx, base_model_path=BASE_CHECKPOINT_PATH,
     trainable=True  (training scripts): equilibrium mode fine-tunes only the
         base model's final layer; hybrid/zimmermann train their correction net.
     trainable=False (evaluation scripts): every model is frozen and put in eval().
+    sup_model_kwargs: optional dict of SuperadiabaticNet constructor kwargs
+        (e.g. {"use_vext": True}) - only used when mode == "hybrid".
     """
     if mode not in MODEL_KEY_BY_MODE:
         raise ValueError(f"Unknown model_mode '{mode}'")
@@ -76,7 +93,7 @@ def build_models(mode, device, dx, base_model_path=BASE_CHECKPOINT_PATH,
     models["base"] = base_model
 
     if mode == "hybrid":
-        sup_model = SuperadiabaticNet(channels=16).to(device)
+        sup_model = SuperadiabaticNet(channels=16, **(sup_model_kwargs or {})).to(device)
         _load_correction_checkpoint(sup_model, sup_model_path, device)
         if trainable:
             sup_model.train()

@@ -34,11 +34,14 @@ class PhiFlowDDFT:
             return grid.with_values(math.tensor(native_tensor, grid.values.shape))
         return grid
 
-    def step(self, rho, v, dt, V_ext, alpha=1):
+    def step(self, rho, v, dt, V_ext, rho_prev=None, v_prev=None, alpha=1):
         """
         Performs one integration step of the DDFT equations.
         rho: CenteredGrid
         v: StaggeredGrid
+        rho_prev/v_prev: the state from one step earlier (None if unavailable,
+            e.g. the very first step) - only used by sup_models configured
+            with use_rho_prev/use_v_prev/use_accel.
         """
         # Guarantee all input grids reside on self.device
         rho = self._ensure_device(rho)
@@ -90,7 +93,11 @@ class PhiFlowDDFT:
         vext_term = - (1.0 / self.m) * field.spatial_gradient(V_ext)
         
         # Internal Force based on Excess Free Energy: - (1/m) ∇(δF_exc/δρ)
-        f_int, _, _ = self.compute_internal_force(rho_next, v, self.models, self.dx, self.device)
+        f_int, _, _ = self.compute_internal_force(
+            rho_next, v, self.models, self.dx, self.device,
+            V_ext_grid=V_ext, rho_prev_grid=rho_prev, v_prev_grid=v_prev, dt=dt,
+            gamma=self.gamma, eta=self.eta,
+        )
         
         # Combine all explicit forces to update velocity
         v_next = v_advected + dt * (fric_term + visc_term + pressure_term + vext_term + f_int * alpha / self.m)
@@ -98,7 +105,16 @@ class PhiFlowDDFT:
         return rho_next, v_next
 
     def save_state(self, rho, v, V_ext, current_time, results_path):
-        f_total, dFdrho_grid, force_components = self.compute_internal_force(rho, v, self.models, self.dx, self.device)
+        # No rho_prev/v_prev available at a standalone save point - get_hybrid_force
+        # falls back to rho_prev=rho/v_prev=v (zero acceleration), which is fine for
+        # a diagnostic snapshot (not part of the actual integration rollout). Any
+        # nonzero dt is safe to pass here since that fallback makes the
+        # accel numerator (v - v_prev) exactly zero regardless of dt's value -
+        # dt=1.0 is just a placeholder to satisfy use_accel's "dt is required" check.
+        f_total, dFdrho_grid, force_components = self.compute_internal_force(
+            rho, v, self.models, self.dx, self.device,
+            V_ext_grid=V_ext, dt=1.0, gamma=self.gamma, eta=self.eta,
+        )
 
         rho_data = rho.values.native('batch,x')[0].cpu().detach().numpy()
         v_data = v.values.vector['x'].native('batch,x')[0].cpu().detach().numpy()

@@ -24,6 +24,10 @@ PARAM_SCHEME = {
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
+    # Optional extra input channels for SuperadiabaticNet (hybrid mode only) -
+    # must match whatever the checkpoint being loaded was trained with, see
+    # models/model.py:OPTIONAL_CHANNELS.
+    "model_kwargs": (dict, {}),
     "k": (float, 1.0),
     "T": (float, 2.0),
     "m": (float, 1.0),
@@ -65,6 +69,7 @@ if __name__ == "__main__":
         sup_model_path=args["sup_model_path"],
         zimmermann_model_path=args["zimmermann_model_path"],
         trainable=False,
+        sup_model_kwargs=args.get("model_kwargs", {}),
     )
 
     # 4. Initialize PhiFlow Grids & Solver
@@ -82,6 +87,7 @@ if __name__ == "__main__":
     force_ratios = []
     blowup_info = {"occurred": False, "at_sim_time": None, "at_step": None, "reason": None}
     start_wall_time = time.time()
+    rho_prev, v_prev = None, None  # no history available before the first step
 
     with tqdm(total=t_range, desc="DDFT Simulation", unit="sim_time", bar_format="{l_bar}{bar}| [{elapsed}<{remaining} {postfix}]") as pbar:
         while current_time < t_range:
@@ -103,7 +109,9 @@ if __name__ == "__main__":
 
             dt = min(CFL * dx / (v_max + 1e-6), args['dt'], t_range - current_time)
 
-            rho, v = solver.step(rho, v, dt, V_ext)
+            rho_next, v_next = solver.step(rho, v, dt, V_ext, rho_prev=rho_prev, v_prev=v_prev)
+            rho_prev, v_prev = rho, v
+            rho, v = rho_next, v_next
             step_counter += 1
 
             current_time += dt

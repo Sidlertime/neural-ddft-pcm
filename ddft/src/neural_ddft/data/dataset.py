@@ -144,18 +144,33 @@ class MultiPotentialMDDataset(Dataset):
         item['potential_id'] = pot_idx
         return item
 
-    def phase_chunk_indices(self, chunk_fraction, rng=None):
+    def phase_chunk_indices(self, chunk_fraction, start_fraction=None, rng=None):
         """
-        Picks one random continuous chunk per potential (scoped to that
-        potential's own trajectory, preserving the "Continuous Multi-Start
-        Shifting Chunks" training strategy) and returns their combined
-        global indices into this dataset.
+        Picks one continuous chunk per potential (scoped to that potential's
+        own trajectory) and returns their combined global indices into this
+        dataset.
+
+        start_fraction=None (default): a random start is drawn each call,
+        preserving the "Continuous Multi-Start Shifting Chunks" strategy -
+        calling this once per curriculum phase resamples the chunk every phase.
+
+        start_fraction=<float in [0, 1]>: deterministic - every potential's
+        chunk starts at this same fraction of its own trajectory length,
+        clamped so the chunk still fits. Calling this with a fixed
+        start_fraction every phase holds the SAME region fixed across the
+        whole curriculum (matching the one empirically successful single-
+        potential "grad_quarter" run, which held one fixed chunk - starting
+        at 40% of the trajectory - for its entire training run instead of
+        resampling, unlike the random-every-phase default above).
         """
         rng = rng if rng is not None else np.random
         indices = []
         for pot_idx, length in enumerate(self._lengths):
             chunk_size = max(1, int(chunk_fraction * length))
             max_start = max(0, length - chunk_size)
-            start = int(rng.randint(0, max_start + 1))
+            if start_fraction is None:
+                start = int(rng.randint(0, max_start + 1))
+            else:
+                start = min(int(start_fraction * length), max_start)
             indices.extend(int(self._offsets[pot_idx]) + np.arange(start, start + chunk_size))
         return indices
