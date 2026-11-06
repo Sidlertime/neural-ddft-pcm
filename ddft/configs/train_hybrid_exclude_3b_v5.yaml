@@ -1,0 +1,54 @@
+# v5: exclude-ref_3b multi-potential hybrid training - V_ext-only ablation.
+#
+# v4 bundled 6 new input channels (V_ext, rho_prev, v_prev, accel, gamma,
+# eta) and produced a genuine win on 3a but a clear regression on 3d's
+# velocity. gamma/eta are scalar-broadcast and IDENTICAL across all 3
+# training potentials this run, so they can't explain per-potential
+# specialization. This version isolates V_ext alone (the only channel that
+# structurally differs between potentials) to test whether it is the
+# load-bearing channel, per the "go nuclear, then trim down" plan.
+#
+# Everything else identical to v4: same base (resampled chunks, 12+2-phase
+# curriculum, noise_std=0.001, eta=0.6944).
+run_id: train_exclude_3b_v5
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_gaussian_langevin_01/avg_500/
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+  - ../data/lj_data/ref_3d_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs:
+  use_vext: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 1.0e-4
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
