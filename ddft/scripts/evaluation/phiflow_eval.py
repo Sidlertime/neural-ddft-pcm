@@ -32,6 +32,8 @@ PARAM_SCHEME = {
     "dt": (float, 1e-4),
     "t_range": (float, 4.0),                    # Total simulated time - lower for fast iteration (e.g. --t_range 0.5)
     "save_interval": (float, 0.01),
+    "v_max_ceiling": (float, 50.0),              # Treat a finite-but-unphysical velocity as a blowup (physical v_max is typically 0.1-0.7)
+    "max_wall_clock_seconds": (float, 1800.0),   # Hard stop so a CFL-shrunk-dt death spiral can't run forever (normal full run is ~17min)
 }
 
 if __name__ == "__main__":
@@ -86,6 +88,17 @@ if __name__ == "__main__":
             v_max = float(np.max(np.abs(v.values.vector['x'].native('batch,x').cpu().detach().numpy())))
             if np.isnan(v_max) or np.isinf(v_max):
                 blowup_info = {"occurred": True, "at_sim_time": current_time, "at_step": step_counter, "reason": "v_max NaN/Inf"}
+                break
+            if v_max > args['v_max_ceiling']:
+                # Finite but unphysical - without this, the CFL term below would keep
+                # shrinking dt as v_max grows, making progress glacially slow without
+                # ever hitting the NaN/Inf check (a "death spiral" that never finishes).
+                blowup_info = {"occurred": True, "at_sim_time": current_time, "at_step": step_counter,
+                                "reason": f"v_max={v_max:.3e} exceeded ceiling={args['v_max_ceiling']}"}
+                break
+            if time.time() - start_wall_time > args['max_wall_clock_seconds']:
+                blowup_info = {"occurred": True, "at_sim_time": current_time, "at_step": step_counter,
+                                "reason": f"wall-clock timeout after {args['max_wall_clock_seconds']}s (last v_max={v_max:.3e}, dt={dt if step_counter else None})"}
                 break
 
             dt = min(CFL * dx / (v_max + 1e-6), args['dt'], t_range - current_time)

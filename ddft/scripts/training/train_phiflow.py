@@ -143,6 +143,7 @@ def main():
     csv_headers = ["epoch", "phase", "window_size", "batch_size", "lr", "loss_total", "loss_rho", "loss_v", "force_ratio"]
     for name in potential_names:
         csv_headers += [f"loss_rho__{name}", f"loss_v__{name}", f"force_ratio__{name}", f"n_samples__{name}"]
+    csv_headers.append("skipped_batches")
     with open(csv_log_path, mode="w", newline="") as f_csv:
         writer = csv.writer(f_csv)
         writer.writerow(csv_headers)
@@ -231,6 +232,7 @@ def main():
             epoch_loss_v = 0.0
             epoch_force_ratio = 0.0
             num_batches = 0
+            epoch_skipped_batches = 0
 
             n_pot = len(potential_names)
             epoch_loss_rho_per_pot = np.zeros(n_pot)
@@ -277,6 +279,7 @@ def main():
                     batch_loss_rho = torch.tensor(0.0, device=device)
                     batch_loss_v = torch.tensor(0.0, device=device)
                     batch_force_ratio = torch.tensor(0.0, device=device)
+                    batch_is_nan = False
 
                     # Unroll trajectory through the PDE
                     for step_idx in range(1, window_size + 1):
@@ -287,6 +290,13 @@ def main():
 
                         pred_rho = rho_next.values.native('batch,x')
                         pred_v = v_next.values.vector['x'].native('batch,x')
+
+                        # Bail out of the rollout immediately on a non-finite prediction,
+                        # before it can poison the per-potential CSV accumulators below
+                        # (not just the backward pass) - see note at batch_is_nan handling.
+                        if not (torch.isfinite(pred_rho).all() and torch.isfinite(pred_v).all()):
+                            batch_is_nan = True
+                            break
 
                         target_rho = rho_batch[:, step_idx, :]
                         target_v = v_batch[:, step_idx, :]
@@ -332,6 +342,16 @@ def main():
                         rho_current = rho_next
                         v_current = v_next
 
+                    # Skip NaN/Inf batches instead of letting them corrupt the model
+                    # weights permanently via backward()/optimizer.step() - a single
+                    # degenerate rollout (e.g. a long window_size chunk that happens to
+                    # hit a numerically fragile region) would otherwise NaN the weights
+                    # for the rest of training, as observed empirically on 2026-11-05.
+                    if batch_is_nan or not torch.isfinite(loss):
+                        epoch_skipped_batches += 1
+                        pbar.set_postfix(skipped=f"{epoch_skipped_batches} (NaN/Inf rollout)")
+                        continue
+
                     loss.backward()
 
                     # Gradient clipping to prevent exploding gradients during long rollouts
@@ -363,7 +383,8 @@ def main():
             avg_ratio_per_pot = epoch_force_ratio_per_pot / per_pot_denom
 
             ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode == "hybrid" else ""
-            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}" + (f" | PerPotentialRatio: {ratio_str}" if ratio_str else ""))
+            skipped_str = f" | Skipped={epoch_skipped_batches}" if epoch_skipped_batches else ""
+            print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}" + (f" | PerPotentialRatio: {ratio_str}" if ratio_str else "") + skipped_str)
 
             # Append to CSV logger
             with open(csv_log_path, mode="a", newline="") as f_csv:
@@ -371,6 +392,7 @@ def main():
                 row = [global_epoch, phase_idx + 1, window_size, batch_size, lr, f"{avg_loss:.6e}", f"{avg_rho:.6e}", f"{avg_v:.6e}", f"{avg_ratio:.6e}"]
                 for i in range(len(potential_names)):
                     row += [f"{avg_rho_per_pot[i]:.6e}", f"{avg_v_per_pot[i]:.6e}", f"{avg_ratio_per_pot[i]:.6e}", int(epoch_n_samples_per_pot[i])]
+                row.append(epoch_skipped_batches)
                 writer.writerow(row)
 
             # Save checkpoint per epoch or on final phase step

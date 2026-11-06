@@ -1,0 +1,54 @@
+# v2: corrected exclude-ref_3b multi-potential hybrid training.
+#
+# v1 (train_hybrid_exclude_3b.yaml) showed near-zero force_ratio contribution
+# and small regressions vs the equilibrium baseline on gaussian/3a. Root
+# cause found by diffing results/2026-10-30_train_grad_hybrid_01 (stuck at
+# baseline, force_ratio maxes ~0.019) against
+# results/2026-10-30_train_grad_quarter_hybrid_01 (the one proven success,
+# force_ratio reaches 0.24 and still climbing) - identical configs except
+# noise_std: 0.01 vs 0.001. v1 used 0.01 (the multi_potential.yaml default,
+# i.e. the known-bad value per _project_summary.md's Attempt 2 finding).
+#
+# This version: noise_std=0.001, and window_size=35 restored (the phase
+# where grad_quarter's force_ratio did almost all its growth, 0.03 -> 0.24 -
+# v1 dropped it per the general multi-potential curriculum's rationale, which
+# was tuned for noise_std=0.01, not this corrected value).
+run_id: train_exclude_3b_v2
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_gaussian_langevin_01/avg_500/
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+  - ../data/lj_data/ref_3d_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 1.0e-4
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
