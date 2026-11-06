@@ -1,7 +1,10 @@
+import builtins
 import torch
 import math
 from phi.torch.flow import *
 import torch.nn.functional as F
+# from phi.torch.flow import * shadows Python's builtin round() with PhiFlow's
+# own (single-argument) round_ - _smooth_periodic below needs the real one.
 
 def get_equilibrium_force(rho_grid, base_model, dx, device):
     rho_pt = rho_grid.values.native(rho_grid.values.shape).float().to(device)
@@ -36,6 +39,34 @@ def _grid_to_native(grid, device, is_vector=False):
     values = grid.values.vector['x'] if is_vector else grid.values
     pt = values.native(values.shape).float().to(device)
     return pt.unsqueeze(0) if pt.dim() == 1 else pt
+
+
+_GAUSSIAN_KERNEL_CACHE = {}
+
+def _smooth_periodic(x_bt, sigma, device):
+    """
+    Applies a fixed (non-learned), differentiable Gaussian blur along the
+    spatial dimension of a (B, X) tensor, with circular (periodic) boundary
+    conditions matching this codebase's domain convention. Used to tame the
+    use_potential_output path: a direct, deterministic countermeasure to the
+    hypothesis that spatial_gradient amplifies whatever high-frequency
+    content is present in the raw network output (see memory:
+    scalar_potential_architecture.md) - smoothing it first removes that
+    content before it gets amplified, at zero learned-parameter cost.
+    """
+    if sigma <= 0:
+        return x_bt
+    key = (builtins.round(sigma, 4), device)
+    kernel = _GAUSSIAN_KERNEL_CACHE.get(key)
+    if kernel is None:
+        radius = max(1, int(builtins.round(3 * sigma)))
+        offsets = torch.arange(-radius, radius + 1, dtype=torch.float32, device=device)
+        kernel = torch.exp(-0.5 * (offsets / sigma) ** 2)
+        kernel = (kernel / kernel.sum()).view(1, 1, -1)
+        _GAUSSIAN_KERNEL_CACHE[key] = kernel
+    pad = kernel.shape[-1] // 2
+    x_padded = F.pad(x_bt.unsqueeze(1), (pad, pad), mode='circular')
+    return F.conv1d(x_padded, kernel).squeeze(1)
 
 def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device,
                       V_ext_grid=None, rho_prev_grid=None, v_prev_grid=None, dt=None,
@@ -95,12 +126,26 @@ def get_hybrid_force(rho_grid, v_grid, base_model, sup_model, dx, device,
         extra_kwargs["eta"] = torch.full_like(rho_pt, float(eta))
 
     if sup_model.training:
-        f_sup_val = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt, **extra_kwargs)
+        sup_raw = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt, **extra_kwargs)
     else:
         with torch.no_grad():
-            f_sup_val = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt, **extra_kwargs)
+            sup_raw = sup_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt, **extra_kwargs)
 
-    f_sup = StaggeredGrid(math.tensor(f_sup_val, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+    if getattr(sup_model, "use_potential_output", False):
+        # sup_raw is a scalar superadiabatic potential field Phi_sup(z), not
+        # yet a force - mirror get_equilibrium_force's second step exactly:
+        # one ordinary (autograd-transparent) spatial_gradient, no
+        # torch.autograd.grad needed here since sup_raw is already a
+        # per-position field (SuperadiabaticNet has no pooling), unlike
+        # F_eq's pooled-to-scalar CNN output.
+        smooth_sigma = getattr(sup_model, "potential_smooth_sigma", 0.0)
+        if smooth_sigma > 0:
+            sup_raw = _smooth_periodic(sup_raw, smooth_sigma, device)
+        sup_potential_grid = CenteredGrid(math.tensor(sup_raw, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+        f_sup = - field.spatial_gradient(sup_potential_grid)
+    else:
+        f_sup = StaggeredGrid(math.tensor(sup_raw, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+
     return f_eq + f_sup, dFdrho_grid, {"f_eq": f_eq, "f_sup": f_sup}
 
 def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):

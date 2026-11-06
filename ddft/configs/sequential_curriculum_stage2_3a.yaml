@@ -1,0 +1,55 @@
+# Experiment A, stage 2/3: sequential/curriculum multi-potential training.
+# Instead of batch-mixing gaussian+3a+3d together (mixed_potential_v2,
+# which hurt density badly), train on each potential in sequence, warm-
+# starting each stage from the previous stage's final checkpoint. Stage 1
+# (gaussian) already exists - reusing
+# results/2026-11-06_generalization_matrix/train_gaussian_hybrid_01.
+# This stage continues that checkpoint's training on 3a alone. Tests
+# whether avoiding within-batch gradient averaging across potentials
+# avoids the density regression mixing caused, or whether catastrophic
+# forgetting of gaussian appears instead once 3a is trained on top.
+run_id: sequential_curriculum/stage2_3a
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: results/2026-11-06_generalization_matrix/train_gaussian_hybrid_01/checkpoints/hybrid_epoch_160.ckpt
+zimmermann_model_path: null
+
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 0.0
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}

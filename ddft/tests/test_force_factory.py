@@ -1,9 +1,11 @@
 import os
+import tempfile
 import torch
 import numpy as np
 import pytest
 from phi.torch.flow import *
-from neural_ddft.models.factory import build_models
+from neural_ddft.models.factory import build_models, _load_correction_checkpoint
+from neural_ddft.models.model import SuperadiabaticNet
 from neural_ddft.physics.force_factory import get_equilibrium_force
 
 CKPT_PATH = "models/c2_dz32.ckpt"
@@ -63,3 +65,34 @@ def test_equilibrium_chemical_potential_matches_finite_difference():
                 f"finite difference ({fd_grad}) - possible autograd disconnection."
             )
     print("[DEBUG] test_equilibrium_chemical_potential_matches_finite_difference passed successfully.")
+
+
+def test_load_correction_checkpoint_rejects_potential_output_mismatch():
+    """
+    A checkpoint trained with use_potential_output=True reinterprets the
+    exact same weight shapes as a different physical quantity (a potential
+    field vs. a force field) than use_potential_output=False - loading one
+    into the other must raise, not silently misinterpret the weights, same
+    as the existing OPTIONAL_CHANNELS mismatch check this extends.
+    """
+    print("\n[DEBUG] Starting test_load_correction_checkpoint_rejects_potential_output_mismatch...")
+    trained_as_potential = SuperadiabaticNet(channels=4, use_potential_output=True)
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        ckpt_path = os.path.join(tmpdir, "sup.ckpt")
+        torch.save(
+            {"state_dict": trained_as_potential.state_dict(), "use_potential_output": True},
+            ckpt_path,
+        )
+
+        loaded_as_force = SuperadiabaticNet(channels=4, use_potential_output=False)
+        try:
+            _load_correction_checkpoint(loaded_as_force, ckpt_path, torch.device("cpu"))
+            assert False, "Expected a ValueError for the use_potential_output mismatch"
+        except ValueError as e:
+            assert "use_potential_output" in str(e)
+
+        # Matching flag loads cleanly.
+        loaded_as_potential = SuperadiabaticNet(channels=4, use_potential_output=True)
+        _load_correction_checkpoint(loaded_as_potential, ckpt_path, torch.device("cpu"))
+    print("[DEBUG] test_load_correction_checkpoint_rejects_potential_output_mismatch passed successfully.")

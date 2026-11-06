@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 
-from neural_ddft.models.model import SuperadiabaticNet, OPTIONAL_CHANNELS
+from neural_ddft.models.model import SuperadiabaticNet, CONFIG_FLAGS
 from neural_ddft.models.zimmermann_net import ZimmermannNet
 from neural_ddft.models.neural_free_energy import NeuralFreeEnergy, NeuralFreeEnergyFine
 
@@ -42,8 +42,12 @@ def _load_correction_checkpoint(model, ckpt_path, device):
         # use_* flags alongside the weights - verify they match this model
         # instance before loading, so a channel-count mismatch is reported with
         # a clear reason instead of either a cryptic shape error or (worse) a
-        # silent misload if the channel counts happen to coincide.
-        for flag in OPTIONAL_CHANNELS:
+        # silent misload if the channel counts happen to coincide. Also covers
+        # use_potential_output (CONFIG_FLAGS = OPTIONAL_CHANNELS + OUTPUT_FLAGS)
+        # - loading a force-output checkpoint into a potential-output model (or
+        # vice versa) would otherwise silently reinterpret the same weights as
+        # a completely different physical quantity.
+        for flag in CONFIG_FLAGS:
             if flag in ckpt and getattr(model, flag, False) != ckpt[flag]:
                 raise ValueError(
                     f"Checkpoint '{ckpt_path}' was trained with {flag}={ckpt[flag]} "

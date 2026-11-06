@@ -6,9 +6,18 @@ import torch.nn as nn
 # keyword arg of the same name (minus "use_").
 OPTIONAL_CHANNELS = ("use_vext", "use_rho_prev", "use_v_prev", "use_accel", "use_gamma", "use_eta")
 
+# Non-input architecture flags that still need the same checkpoint
+# save/consistency-check treatment as OPTIONAL_CHANNELS (see factory.py /
+# train_phiflow.py) but must NOT be iterated by forward()'s input-channel
+# stacking loop below, since they affect output interpretation, not input
+# shape. Kept separate from OPTIONAL_CHANNELS for that reason.
+OUTPUT_FLAGS = ("use_potential_output", "potential_smooth_sigma")
+CONFIG_FLAGS = OPTIONAL_CHANNELS + OUTPUT_FLAGS
+
 class SuperadiabaticNet(nn.Module):
     def __init__(self, channels=16, use_vext=False, use_rho_prev=False, use_v_prev=False,
-                 use_accel=False, use_gamma=False, use_eta=False):
+                 use_accel=False, use_gamma=False, use_eta=False, use_potential_output=False,
+                 potential_smooth_sigma=0.0):
         super().__init__()
         self.use_vext = use_vext
         self.use_rho_prev = use_rho_prev
@@ -16,6 +25,20 @@ class SuperadiabaticNet(nn.Module):
         self.use_accel = use_accel
         self.use_gamma = use_gamma
         self.use_eta = use_eta
+        # If True, this network's (B, X) output is interpreted as a scalar
+        # superadiabatic potential field (one more spatial_gradient needed
+        # to get a force - see force_factory.py:get_hybrid_force) rather
+        # than a force field directly. Purely an output-interpretation
+        # switch - the architecture/forward() below is identical either way.
+        self.use_potential_output = use_potential_output
+        # Only used when use_potential_output=True: std-dev (in grid cells)
+        # of a fixed Gaussian blur applied to the raw potential field before
+        # spatial_gradient - a direct, non-learned countermeasure to
+        # high-frequency noise amplification (see
+        # force_factory.py:_smooth_periodic and memory
+        # scalar_potential_architecture.md). 0.0 = no smoothing (default,
+        # matches original behavior exactly).
+        self.potential_smooth_sigma = potential_smooth_sigma
 
         # Base 4 channels: [Density, Velocity, grad(Density), grad(Velocity)],
         # plus one more for each optional channel enabled above.
@@ -29,12 +52,16 @@ class SuperadiabaticNet(nn.Module):
             nn.Mish(),
             nn.Conv1d(channels, channels, kernel_size=5, padding=2, padding_mode='circular'),
             nn.Mish(),
-            # Output is 1 channel: The Superadiabatic Force (F_sup)
+            # Output is 1 channel: either F_sup directly, or (if
+            # use_potential_output) a scalar potential field that
+            # force_factory.py turns into F_sup via one more spatial
+            # gradient - see the use_potential_output docstring above.
             nn.Conv1d(channels, 1, kernel_size=5, padding=2, padding_mode='circular')
         )
 
         # Initialize output weights to zero!
-        # This ensures that at Epoch 0, F_sup is exactly 0.0,
+        # This ensures that at Epoch 0, F_sup is exactly 0.0 either way
+        # (a zero potential field has a zero gradient too),
         # so the simulation starts as pure, uncorrupted equilibrium DDFT.
         nn.init.normal_(self.net[-1].weight, mean=0.0, std=1e-2)
         nn.init.zeros_(self.net[-1].bias)

@@ -35,6 +35,7 @@ def main():
     model_kwargs = {
         "use_vext": True, "use_rho_prev": True, "use_v_prev": True,
         "use_accel": True, "use_gamma": True, "use_eta": True,
+        "use_potential_output": True,
     }
     compute_internal_force = FORCE_MODES[mode]
     models, trainable_params = build_models(mode=mode, device=device, dx=dataset.dr, trainable=True, sup_model_kwargs=model_kwargs)

@@ -16,7 +16,7 @@ from phi.torch.flow import *
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 from neural_ddft.data.dataset import MultiPotentialMDDataset, potential_name_from_path
 from neural_ddft.models.factory import build_models, MODEL_KEY_BY_MODE
-from neural_ddft.models.model import OPTIONAL_CHANNELS
+from neural_ddft.models.model import OPTIONAL_CHANNELS, CONFIG_FLAGS
 from neural_ddft.physics.force_factory import FORCE_MODES
 
 # ==========================================
@@ -423,11 +423,11 @@ def main():
                 ckpt_path = os.path.join(ckpt_dir, f"{mode}_epoch_{global_epoch:03d}.ckpt")
                 active_model = models[MODEL_KEY_BY_MODE[mode]]
                 if hasattr(active_model, OPTIONAL_CHANNELS[0]):
-                    # SuperadiabaticNet - persist its input-channel flags alongside
-                    # the weights so a future load can verify they match (see
-                    # models/factory.py:_load_correction_checkpoint).
+                    # SuperadiabaticNet - persist its input-channel + output-mode
+                    # flags alongside the weights so a future load can verify
+                    # they match (see models/factory.py:_load_correction_checkpoint).
                     ckpt_payload = {"state_dict": active_model.state_dict()}
-                    ckpt_payload.update({flag: getattr(active_model, flag) for flag in OPTIONAL_CHANNELS})
+                    ckpt_payload.update({flag: getattr(active_model, flag) for flag in CONFIG_FLAGS})
                     torch.save(ckpt_payload, ckpt_path)
                 else:
                     torch.save(active_model.state_dict(), ckpt_path)
