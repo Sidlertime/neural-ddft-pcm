@@ -151,7 +151,7 @@ class PhiFlowDDFT:
             np.save(f"{results_path}/{comp_name}{current_time:06.3f}.npy", comp_data)
             if comp_name == "f_eq":
                 f_eq_norm = np.linalg.norm(comp_data)
-            elif comp_name in ("f_sup", "f_zimmermann"):
+            elif comp_name in ("f_sup", "f_zimmermann", "f_power"):
                 force_ratio = np.linalg.norm(comp_data)
 
         if force_ratio is not None and f_eq_norm is not None:

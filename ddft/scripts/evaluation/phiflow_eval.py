@@ -24,6 +24,7 @@ PARAM_SCHEME = {
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
+    "power_model_path": (str, None),
     # Optional extra input channels for SuperadiabaticNet (hybrid mode only) -
     # must match whatever the checkpoint being loaded was trained with, see
     # models/model.py:OPTIONAL_CHANNELS.
@@ -69,6 +70,7 @@ if __name__ == "__main__":
         base_model_path=args["base_model_path"],
         sup_model_path=args["sup_model_path"],
         zimmermann_model_path=args["zimmermann_model_path"],
+        power_model_path=args["power_model_path"],
         trainable=False,
         sup_model_kwargs=args.get("model_kwargs", {}),
     )

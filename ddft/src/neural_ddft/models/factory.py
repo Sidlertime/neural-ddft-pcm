@@ -3,10 +3,11 @@ import torch.nn as nn
 
 from neural_ddft.models.model import SuperadiabaticNet, CONFIG_FLAGS
 from neural_ddft.models.zimmermann_net import ZimmermannNet
+from neural_ddft.models.power_functional_net import PowerFunctionalNet
 from neural_ddft.models.neural_free_energy import NeuralFreeEnergy, NeuralFreeEnergyFine
 
 BASE_CHECKPOINT_PATH = "models/c2_dz32.ckpt"
-MODEL_KEY_BY_MODE = {"equilibrium": "base", "hybrid": "sup", "zimmermann": "zimmermann"}
+MODEL_KEY_BY_MODE = {"equilibrium": "base", "hybrid": "sup", "zimmermann": "zimmermann", "hybrid_power": "power"}
 
 
 def _load_base_model(base_model_path, dx, device):
@@ -60,17 +61,20 @@ def _load_correction_checkpoint(model, ckpt_path, device):
 
 
 def build_models(mode, device, dx, base_model_path=BASE_CHECKPOINT_PATH,
-                  sup_model_path=None, zimmermann_model_path=None, trainable=True,
-                  sup_model_kwargs=None):
+                  sup_model_path=None, zimmermann_model_path=None, power_model_path=None,
+                  trainable=True, sup_model_kwargs=None):
     """
-    Builds the {'base', 'sup'|'zimmermann'} model dict and the list of
-    trainable parameters for a given force mode ("equilibrium"/"hybrid"/"zimmermann").
+    Builds the {'base', 'sup'|'zimmermann'|'power'} model dict and the list of
+    trainable parameters for a given force mode
+    ("equilibrium"/"hybrid"/"zimmermann"/"hybrid_power").
 
     trainable=True  (training scripts): equilibrium mode fine-tunes only the
-        base model's final layer; hybrid/zimmermann train their correction net.
+        base model's final layer; hybrid/zimmermann/hybrid_power train their
+        correction net.
     trainable=False (evaluation scripts): every model is frozen and put in eval().
-    sup_model_kwargs: optional dict of SuperadiabaticNet constructor kwargs
-        (e.g. {"use_vext": True}) - only used when mode == "hybrid".
+    sup_model_kwargs: optional dict of SuperadiabaticNet/PowerFunctionalNet
+        constructor kwargs (e.g. {"use_vext": True}) - used when mode is
+        "hybrid" or "hybrid_power" (both share the same OPTIONAL_CHANNELS).
     """
     if mode not in MODEL_KEY_BY_MODE:
         raise ValueError(f"Unknown model_mode '{mode}'")
@@ -114,5 +118,14 @@ def build_models(mode, device, dx, base_model_path=BASE_CHECKPOINT_PATH,
         else:
             z_model.eval()
         models["zimmermann"] = z_model
+    elif mode == "hybrid_power":
+        power_model = PowerFunctionalNet(channels=16, **(sup_model_kwargs or {})).to(device)
+        _load_correction_checkpoint(power_model, power_model_path, device)
+        if trainable:
+            power_model.train()
+            trainable_params.extend(power_model.parameters())
+        else:
+            power_model.eval()
+        models["power"] = power_model
 
     return models, trainable_params

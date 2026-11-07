@@ -190,6 +190,91 @@ def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
 
     return f_total, dFdrho_grid, {"f_eq": f_eq, "f_zimmermann": f_zimmermann_grid}
 
+def get_hybrid_power_force(rho_grid, v_grid, base_model, power_model, dx, device,
+                            V_ext_grid=None, rho_prev_grid=None, v_prev_grid=None, dt=None,
+                            gamma=None, eta=None):
+    """
+    f_sup = -(1/rho) * dP^ex/dv, where P^ex[rho, v] is a true scalar excess
+    power functional predicted by power_model (PowerFunctionalNet) - the
+    Power-Functional-Theory analog of F_eq, but differentiated w.r.t.
+    velocity (not density) and needing no second spatial derivative.
+    """
+    f_eq, dFdrho_grid = get_equilibrium_force(rho_grid, base_model, dx, device)
+
+    rho_pt = rho_grid.values.native(rho_grid.values.shape).float().to(device)
+    v_pt = v_grid.values.vector['x'].native(v_grid.values.vector['x'].shape).float().to(device)
+
+    if rho_pt.dim() == 1:
+        rho_pt = rho_pt.unsqueeze(0)
+    if v_pt.dim() == 1:
+        v_pt = v_pt.unsqueeze(0)
+
+    # v_pt must carry requires_grad BEFORE grad_v_pt is derived from it, so
+    # torch.autograd.grad below sees both the direct-v and the grad-v input
+    # paths (grad_v_pt is a torch.roll of v_pt, already differentiable).
+    if not v_pt.requires_grad:
+        v_pt = v_pt.detach().requires_grad_(True)
+
+    grad_rho_pt = (torch.roll(rho_pt, shifts=-1, dims=-1) - torch.roll(rho_pt, shifts=1, dims=-1)) / (2 * dx)
+    grad_v_pt = (torch.roll(v_pt, shifts=-1, dims=-1) - torch.roll(v_pt, shifts=1, dims=-1)) / (2 * dx)
+
+    # Same optional-channel-building logic as get_hybrid_force (see that
+    # function's comment for the fallback rationale).
+    extra_kwargs = {}
+    if getattr(power_model, "use_vext", False):
+        if V_ext_grid is None:
+            raise ValueError("power_model requires V_ext but none was passed to get_hybrid_power_force")
+        extra_kwargs["v_ext"] = _grid_to_native(V_ext_grid, device)
+
+    needs_rho_prev = getattr(power_model, "use_rho_prev", False)
+    needs_v_prev = getattr(power_model, "use_v_prev", False)
+    needs_accel = getattr(power_model, "use_accel", False)
+    if needs_rho_prev or needs_accel:
+        rho_prev_pt = _grid_to_native(rho_prev_grid, device) if rho_prev_grid is not None else rho_pt
+        if needs_rho_prev:
+            extra_kwargs["rho_prev"] = rho_prev_pt
+    if needs_v_prev or needs_accel:
+        v_prev_pt = _grid_to_native(v_prev_grid, device, is_vector=True) if v_prev_grid is not None else v_pt
+        if needs_v_prev:
+            extra_kwargs["v_prev"] = v_prev_pt
+    if needs_accel:
+        if dt is None or dt == 0:
+            raise ValueError("power_model requires accel but dt was not passed to get_hybrid_power_force")
+        extra_kwargs["accel"] = (v_pt - v_prev_pt) / dt
+
+    if getattr(power_model, "use_gamma", False):
+        if gamma is None:
+            raise ValueError("power_model requires gamma but none was passed to get_hybrid_power_force")
+        extra_kwargs["gamma"] = torch.full_like(rho_pt, float(gamma))
+    if getattr(power_model, "use_eta", False):
+        if eta is None:
+            raise ValueError("power_model requires eta but none was passed to get_hybrid_power_force")
+        extra_kwargs["eta"] = torch.full_like(rho_pt, float(eta))
+
+    is_training = power_model.training
+    with torch.enable_grad():
+        p_exc = power_model(rho_pt, v_pt, grad_rho_pt, grad_v_pt, **extra_kwargs)
+        grad_out = torch.autograd.grad(p_exc.sum(), v_pt, create_graph=is_training, allow_unused=True)[0]
+        dPdv_tensor = torch.zeros_like(v_pt) if grad_out is None else grad_out
+
+    if not is_training:
+        dPdv_tensor = dPdv_tensor.detach()
+
+    # f_sup = -(1/rho) dP^ex/dv reintroduces the exact 1/rho singularity
+    # mechanism root-caused for 3b/3d (weekend_ablation_sweep.md Round 6:
+    # viscosity/pressure terms blow up as rho erodes toward its floor) -
+    # clamp defensively from day one. This is a local safety clamp only
+    # (not wired to the project's configurable rho_floor, which lives in
+    # pde_step/PhiFlowDDFT and isn't threaded through FORCE_MODES' fixed
+    # lambda signatures - adding it there would require every mode's
+    # function to accept an extra kwarg it ignores, not worth the risk to
+    # working modes for what is here just a divide-by-zero guard).
+    _RHO_FLOOR_SAFETY_CLAMP = 1e-6
+    f_sup_tensor = -dPdv_tensor / torch.clamp(rho_pt, min=_RHO_FLOOR_SAFETY_CLAMP)
+    f_sup = StaggeredGrid(math.tensor(f_sup_tensor, batch('batch'), spatial('x')), extrapolation.PERIODIC, bounds=rho_grid.bounds)
+
+    return f_eq + f_sup, dFdrho_grid, {"f_eq": f_eq, "f_power": f_sup}
+
 # The Dispatcher Dictionary
 # Every mode returns (f_total, dFdrho_grid, force_components), where
 # force_components is a dict of the individual force contributions (e.g.
@@ -199,7 +284,8 @@ def get_zimmermann_force(rho_grid, v_grid, base_model, z_model, dx, device):
 # v_prev_grid/dt/gamma/eta (cheap - only "hybrid" with the corresponding
 # sup_model flags enabled actually uses them; the other modes just ignore them).
 FORCE_MODES = {
-    "equilibrium": lambda rho, v, models, dx, dev, **extra: (*get_equilibrium_force(rho, models['base'], dx, dev), {}),
-    "hybrid":      lambda rho, v, models, dx, dev, **extra: get_hybrid_force(rho, v, models['base'], models['sup'], dx, dev, **extra),
-    "zimmermann":  lambda rho, v, models, dx, dev, **extra: get_zimmermann_force(rho, v, models['base'], models['zimmermann'], dx, dev)
+    "equilibrium":  lambda rho, v, models, dx, dev, **extra: (*get_equilibrium_force(rho, models['base'], dx, dev), {}),
+    "hybrid":       lambda rho, v, models, dx, dev, **extra: get_hybrid_force(rho, v, models['base'], models['sup'], dx, dev, **extra),
+    "zimmermann":   lambda rho, v, models, dx, dev, **extra: get_zimmermann_force(rho, v, models['base'], models['zimmermann'], dx, dev),
+    "hybrid_power": lambda rho, v, models, dx, dev, **extra: get_hybrid_power_force(rho, v, models['base'], models['power'], dx, dev, **extra),
 }

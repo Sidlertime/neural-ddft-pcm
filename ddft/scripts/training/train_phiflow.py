@@ -32,6 +32,7 @@ PARAM_SCHEME = {
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
+    "power_model_path": (str, None),
     # Optional extra input channels for SuperadiabaticNet (hybrid mode only),
     # e.g. {"use_vext": true, "use_accel": true} - see models/model.py:OPTIONAL_CHANNELS.
     "model_kwargs": (dict, {}),
@@ -48,6 +49,7 @@ PARAM_SCHEME = {
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
     "loss_weight_v": (float, 10.0),              # Balance between density loss and velocity loss
+    "loss_weight_rho": (float, 1.0),             # Density-side loss weight - symmetric counterpart to loss_weight_v, default preserves original (implicit-1.0) behavior exactly
     "noise_std": (float, 1e-2),                  # Gaussian noise standard deviation for input perturbation (scheduled sampling / robustness)
     "loss_spike_multiplier": (float, 1000.0),   # Skip a batch if its loss exceeds this multiple of the running EMA of accepted losses (catches finite-but-anomalous blowups the isfinite() guard misses). Must comfortably exceed the legitimate loss-scale jump a curriculum phase transition can cause (observed ~100x at a window_size=15->35 jump) while staying far below genuine corruption events (observed ~1e24x); 0 or None disables
     "chunk_fraction": (float, 0.15),             # Size of each phase's per-potential training chunk, as a fraction of that phase's dataset length
@@ -186,6 +188,7 @@ def main():
         base_model_path=args["base_model_path"],
         sup_model_path=args["sup_model_path"],
         zimmermann_model_path=args["zimmermann_model_path"],
+        power_model_path=args["power_model_path"],
         trainable=True,
         sup_model_kwargs=args.get("model_kwargs", {}),
     )
@@ -200,6 +203,7 @@ def main():
 
     base_weight_decay = float(args.get("weight_decay", 1e-4))
     base_loss_weight_v = float(args.get("loss_weight_v", 5.0))
+    base_loss_weight_rho = float(args.get("loss_weight_rho", 1.0))
     base_noise_std = float(args.get("noise_std", 0.0))
 
     optimizer = torch.optim.Adam(trainable_params, lr=1e-3, weight_decay=base_weight_decay)
@@ -217,7 +221,7 @@ def main():
     spike_multiplier = float(args.get("loss_spike_multiplier", 20.0) or 0.0)
 
     print(f"\nStarting training for mode: {mode}")
-    print(f"gamma={args['gamma']} | eta={args['eta']} | base_weight_decay={base_weight_decay} | base_loss_weight_v={base_loss_weight_v}")
+    print(f"gamma={args['gamma']} | eta={args['eta']} | base_weight_decay={base_weight_decay} | base_loss_weight_rho={base_loss_weight_rho} | base_loss_weight_v={base_loss_weight_v}")
     print(f"Log CSV saved to: {csv_log_path}")
     print(f"Checkpoints will be saved to: {ckpt_dir}\n")
 
@@ -234,10 +238,11 @@ def main():
         # Allow per-phase parameter overrides
         phase_weight_decay = float(phase.get("weight_decay", base_weight_decay))
         phase_loss_weight_v = float(phase.get("loss_weight_v", base_loss_weight_v))
+        phase_loss_weight_rho = float(phase.get("loss_weight_rho", base_loss_weight_rho))
         phase_noise_std = float(phase.get("noise_std", base_noise_std))
 
         print(f"\n{'='*60}")
-        print(f"--- Phase {phase_idx+1}/{len(args['curriculum'])}: Window Size={window_size}, Batch={batch_size}, LR={lr}, LossW_V={phase_loss_weight_v}, Noise={phase_noise_std} ---")
+        print(f"--- Phase {phase_idx+1}/{len(args['curriculum'])}: Window Size={window_size}, Batch={batch_size}, LR={lr}, LossW_Rho={phase_loss_weight_rho}, LossW_V={phase_loss_weight_v}, Noise={phase_noise_std} ---")
         print(f"{'='*60}")
 
         # Update learning rate and weight decay
@@ -347,7 +352,7 @@ def main():
                         batch_loss_rho = batch_loss_rho + loss_rho_step
                         batch_loss_v = batch_loss_v + loss_v_step
 
-                        loss = loss + loss_rho_step + (phase_loss_weight_v * loss_v_step)
+                        loss = loss + (phase_loss_weight_rho * loss_rho_step) + (phase_loss_weight_v * loss_v_step)
 
                         # Per-sample (unreduced) losses purely for per-potential observability -
                         # does not affect the backprop target `loss` above.
@@ -360,9 +365,12 @@ def main():
                         # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode.
                         # Reuses the f_eq/f_sup already computed inside pde_step's internal
                         # compute_internal_force call - no second base/sup model forward pass.
-                        if mode == "hybrid":
+                        # hybrid_power's correction component is keyed "f_power" rather than
+                        # "f_sup" (see force_factory.py:get_hybrid_power_force) - same quantity,
+                        # different force function, different dict key.
+                        if mode in ("hybrid", "hybrid_power"):
                             f_eq_grid = force_components["f_eq"]
-                            f_sup_grid = force_components["f_sup"]
+                            f_sup_grid = force_components["f_sup" if mode == "hybrid" else "f_power"]
                             f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
                             f_sup_tensor = f_sup_grid.values.vector['x'].native(f_sup_grid.values.vector['x'].shape)
 
@@ -440,7 +448,7 @@ def main():
                     epoch_loss += accepted_loss_item
                     epoch_loss_rho += batch_loss_rho.detach().item()
                     epoch_loss_v += batch_loss_v.detach().item()
-                    epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode == "hybrid" else 0.0
+                    epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode in ("hybrid", "hybrid_power") else 0.0
                     num_batches += 1
 
                     pbar.set_postfix(
@@ -461,7 +469,7 @@ def main():
             avg_v_per_pot = epoch_loss_v_per_pot / per_pot_denom
             avg_ratio_per_pot = epoch_force_ratio_per_pot / per_pot_denom
 
-            ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode == "hybrid" else ""
+            ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode in ("hybrid", "hybrid_power") else ""
             skipped_str = (
                 f" | Skipped={epoch_skipped_batches}"
                 f" (nan={epoch_skipped_rollout_nan}, spike={epoch_skipped_loss_spike}, grad={epoch_skipped_grad_nonfinite})"
@@ -487,7 +495,7 @@ def main():
                     # flags alongside the weights so a future load can verify
                     # they match (see models/factory.py:_load_correction_checkpoint).
                     ckpt_payload = {"state_dict": active_model.state_dict()}
-                    ckpt_payload.update({flag: getattr(active_model, flag) for flag in CONFIG_FLAGS})
+                    ckpt_payload.update({flag: getattr(active_model, flag) for flag in CONFIG_FLAGS if hasattr(active_model, flag)})
                     torch.save(ckpt_payload, ckpt_path)
                 else:
                     torch.save(active_model.state_dict(), ckpt_path)
