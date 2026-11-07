@@ -34,6 +34,7 @@ PARAM_SCHEME = {
     "gamma": (float, 0.1),
     "eta": (float, 0.67),
     "dt": (float, 1e-4),
+    "rho_floor": (float, 1e-6),                 # Density clamp floor - must match the value the checkpoint was trained with for a fair comparison
     "t_range": (float, 4.0),                    # Total simulated time - lower for fast iteration (e.g. --t_range 0.5)
     "save_interval": (float, 0.01),
     "v_max_ceiling": (float, 50.0),              # Treat a finite-but-unphysical velocity as a blowup (physical v_max is typically 0.1-0.7)

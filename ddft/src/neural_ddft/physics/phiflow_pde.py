@@ -24,6 +24,8 @@ class PhiFlowDDFT:
         self.gamma = float(config.get("gamma", 2.0))
         self.eta = float(config.get("eta", 0.01))
         self.kBT = float(config.get("k", 1.0)) * float(config.get("T", 2.0))
+        self.dt = float(config.get("dt", 1e-4))
+        self.rho_floor = float(config.get("rho_floor", 1e-6))
 
     def _ensure_device(self, grid):
         if grid is None:
@@ -34,7 +36,7 @@ class PhiFlowDDFT:
             return grid.with_values(math.tensor(native_tensor, grid.values.shape))
         return grid
 
-    def step(self, rho, v, dt, V_ext, rho_prev=None, v_prev=None, alpha=1):
+    def step(self, rho, v, dt=None, V_ext=None, rho_prev=None, v_prev=None, alpha=1):
         """
         Performs one integration step of the DDFT equations.
         rho: CenteredGrid
@@ -42,7 +44,14 @@ class PhiFlowDDFT:
         rho_prev/v_prev: the state from one step earlier (None if unavailable,
             e.g. the very first step) - only used by sup_models configured
             with use_rho_prev/use_v_prev/use_accel.
+        dt: defaults to self.dt (set from config at construction) if not given,
+            so eval-side sweeps can rely on the same configured value as
+            training instead of repeating it at every call site. Positional
+            order is unchanged (rho, v, dt, V_ext, ...) for compatibility with
+            existing positional callers (e.g. scripts/evaluation/phiflow_eval.py).
         """
+        if dt is None:
+            dt = self.dt
         # Guarantee all input grids reside on self.device
         rho = self._ensure_device(rho)
         v = self._ensure_device(v)
@@ -66,7 +75,7 @@ class PhiFlowDDFT:
         
         # field.divergence calculates ∇(flux) and returns it to the cell centers
         rho_next = rho - dt * field.divergence(total_flux)
-        rho_next = rho_next.with_values(math.maximum(rho_next.values, 1e-6))
+        rho_next = rho_next.with_values(math.maximum(rho_next.values, self.rho_floor))
         
         # ==========================================
         # EQUATION 2: ∂v/∂t = ... (Velocity Balance)

@@ -43,11 +43,13 @@ PARAM_SCHEME = {
     "gamma": (float, 0.1),                      # Friction coefficient (1.0 / Tdamp in LJ units)
     "eta": (float, 0.67),                       # Shear viscosity (LJ units)
     "dt": (float, 1e-4),
-    
+    "rho_floor": (float, 1e-6),                 # Density clamp floor - viscosity/pressure terms scale as 1/rho, so this controls how extreme they can get as density erodes
+
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
     "loss_weight_v": (float, 10.0),              # Balance between density loss and velocity loss
     "noise_std": (float, 1e-2),                  # Gaussian noise standard deviation for input perturbation (scheduled sampling / robustness)
+    "loss_spike_multiplier": (float, 1000.0),   # Skip a batch if its loss exceeds this multiple of the running EMA of accepted losses (catches finite-but-anomalous blowups the isfinite() guard misses). Must comfortably exceed the legitimate loss-scale jump a curriculum phase transition can cause (observed ~100x at a window_size=15->35 jump) while staying far below genuine corruption events (observed ~1e24x); 0 or None disables
     "chunk_fraction": (float, 0.15),             # Size of each phase's per-potential training chunk, as a fraction of that phase's dataset length
     "chunk_start_fraction": (float, None),       # If set, every phase's chunk starts at this same fixed fraction of the trajectory (no resampling) - mirrors the one proven-successful single-potential run, which held one fixed chunk for its entire training. If None (default), a fresh random chunk is drawn each phase ("Continuous Multi-Start Shifting Chunks").
     "curriculum": (list, [
@@ -87,6 +89,7 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
     gamma = config["gamma"]
     eta = config["eta"]
     kBT = config["k"] * config["T"]
+    rho_floor = config.get("rho_floor", 1e-6)
 
     # 1. Continuity: ∂ρ/∂t = -∇(ρv)
     rho_faces = rho.at(v)
@@ -96,7 +99,7 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
     total_flux = flux_centered - D_art * grad_rho
 
     rho_next = rho - dt * field.divergence(total_flux)
-    rho_next = rho_next.with_values(math.maximum(rho_next.values, 1e-6))
+    rho_next = rho_next.with_values(math.maximum(rho_next.values, rho_floor))
 
     # 2. Momentum equation
     v_advected = advect.semi_lagrangian(v, v, dt)
@@ -158,6 +161,7 @@ def main():
     for name in potential_names:
         csv_headers += [f"loss_rho__{name}", f"loss_v__{name}", f"force_ratio__{name}", f"n_samples__{name}"]
     csv_headers.append("skipped_batches")
+    csv_headers += ["skipped_rollout_nan", "skipped_loss_spike", "skipped_grad_nonfinite"]
     with open(csv_log_path, mode="w", newline="") as f_csv:
         writer = csv.writer(f_csv)
         writer.writerow(csv_headers)
@@ -200,6 +204,17 @@ def main():
 
     optimizer = torch.optim.Adam(trainable_params, lr=1e-3, weight_decay=base_weight_decay)
     global_epoch = 0
+
+    # Running EMA of accepted-batch losses, used by the loss-spike guard below -
+    # catches finite-but-anomalous blowups (e.g. loss reaching 1e22, still well
+    # under float32's isfinite ceiling) that the plain torch.isfinite() check
+    # cannot see. Only updated on accepted batches so a spike never pollutes
+    # its own baseline. See feedback_warmstart_nan_gap.md for the incident that
+    # motivated this - a checkpoint whose loss curve "recovered" after a spike
+    # was still silently corrupted, with no finite-value trace of the damage.
+    loss_ema = None
+    loss_ema_decay = 0.98
+    spike_multiplier = float(args.get("loss_spike_multiplier", 20.0) or 0.0)
 
     print(f"\nStarting training for mode: {mode}")
     print(f"gamma={args['gamma']} | eta={args['eta']} | base_weight_decay={base_weight_decay} | base_loss_weight_v={base_loss_weight_v}")
@@ -252,6 +267,9 @@ def main():
             epoch_force_ratio = 0.0
             num_batches = 0
             epoch_skipped_batches = 0
+            epoch_skipped_rollout_nan = 0
+            epoch_skipped_loss_spike = 0
+            epoch_skipped_grad_nonfinite = 0
 
             n_pot = len(potential_names)
             epoch_loss_rho_per_pot = np.zeros(n_pot)
@@ -280,7 +298,7 @@ def main():
                     # Optional noise injection for robustness against autoregressive exposure bias
                     if phase_noise_std > 0.0:
                         rho_batch = rho_batch + torch.randn_like(rho_batch) * phase_noise_std
-                        rho_batch = torch.clamp(rho_batch, min=1e-6)
+                        rho_batch = torch.clamp(rho_batch, min=args["rho_floor"])
 
                     B = rho_batch.shape[0]
 
@@ -370,18 +388,56 @@ def main():
                     # degenerate rollout (e.g. a long window_size chunk that happens to
                     # hit a numerically fragile region) would otherwise NaN the weights
                     # for the rest of training, as observed empirically on 2026-11-05.
-                    if batch_is_nan or not torch.isfinite(loss):
+                    loss_is_finite = bool(torch.isfinite(loss))
+
+                    # Loss-spike guard: a loss that is technically finite but wildly
+                    # anomalous relative to recent training (e.g. 1e22, confirmed to
+                    # occur in practice - see feedback_warmstart_nan_gap.md) sails
+                    # through the isfinite() check above. Gradient clipping below
+                    # then bounds the resulting weight-update MAGNITUDE, so the
+                    # corruption leaves no trace in weight norms - it has to be
+                    # caught here, on the loss value itself, before clipping
+                    # launders the signal away.
+                    is_loss_spike = False
+                    if not batch_is_nan and loss_is_finite and spike_multiplier > 0 and loss_ema is not None:
+                        is_loss_spike = loss.item() > spike_multiplier * loss_ema
+
+                    if batch_is_nan or not loss_is_finite:
                         epoch_skipped_batches += 1
+                        epoch_skipped_rollout_nan += 1
                         pbar.set_postfix(skipped=f"{epoch_skipped_batches} (NaN/Inf rollout)")
+                        continue
+                    if is_loss_spike:
+                        epoch_skipped_batches += 1
+                        epoch_skipped_loss_spike += 1
+                        pbar.set_postfix(skipped=f"{epoch_skipped_batches} (loss spike {loss.item():.2e} > {spike_multiplier:.0f}x EMA={loss_ema:.2e})")
                         continue
 
                     loss.backward()
+
+                    # Defense-in-depth for the original (non-spike) failure mode: a
+                    # rollout that stayed finite but produced non-finite gradients
+                    # directly (e.g. a warm-started continuation onto a fragile
+                    # potential, see feedback_warmstart_nan_gap.md's first incident).
+                    grad_is_finite = all(
+                        torch.isfinite(p.grad).all() for p in trainable_params if p.grad is not None
+                    )
+                    if not grad_is_finite:
+                        epoch_skipped_batches += 1
+                        epoch_skipped_grad_nonfinite += 1
+                        pbar.set_postfix(skipped=f"{epoch_skipped_batches} (non-finite grad)")
+                        continue
 
                     # Gradient clipping to prevent exploding gradients during long rollouts
                     torch.nn.utils.clip_grad_norm_(trainable_params, max_norm=1.0)
                     optimizer.step()
 
-                    epoch_loss += loss.detach().item()
+                    accepted_loss_item = loss.detach().item()
+                    loss_ema = accepted_loss_item if loss_ema is None else (
+                        loss_ema_decay * loss_ema + (1 - loss_ema_decay) * accepted_loss_item
+                    )
+
+                    epoch_loss += accepted_loss_item
                     epoch_loss_rho += batch_loss_rho.detach().item()
                     epoch_loss_v += batch_loss_v.detach().item()
                     epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode == "hybrid" else 0.0
@@ -406,7 +462,10 @@ def main():
             avg_ratio_per_pot = epoch_force_ratio_per_pot / per_pot_denom
 
             ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode == "hybrid" else ""
-            skipped_str = f" | Skipped={epoch_skipped_batches}" if epoch_skipped_batches else ""
+            skipped_str = (
+                f" | Skipped={epoch_skipped_batches}"
+                f" (nan={epoch_skipped_rollout_nan}, spike={epoch_skipped_loss_spike}, grad={epoch_skipped_grad_nonfinite})"
+            ) if epoch_skipped_batches else ""
             print(f"Epoch {global_epoch:03d} Summary | Mean Step: Total={avg_loss:.6f} | Rho={avg_rho:.6f} | V={avg_v:.6f} | ForceRatio={avg_ratio:.4f}" + (f" | PerPotentialRatio: {ratio_str}" if ratio_str else "") + skipped_str)
 
             # Append to CSV logger
@@ -416,6 +475,7 @@ def main():
                 for i in range(len(potential_names)):
                     row += [f"{avg_rho_per_pot[i]:.6e}", f"{avg_v_per_pot[i]:.6e}", f"{avg_ratio_per_pot[i]:.6e}", int(epoch_n_samples_per_pot[i])]
                 row.append(epoch_skipped_batches)
+                row += [epoch_skipped_rollout_nan, epoch_skipped_loss_spike, epoch_skipped_grad_nonfinite]
                 writer.writerow(row)
 
             # Save checkpoint per epoch or on final phase step
