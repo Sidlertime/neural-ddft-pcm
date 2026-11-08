@@ -7,10 +7,17 @@ from torch.utils.data import Dataset
 from scipy.ndimage import gaussian_filter1d
 
 class MDWindowDataset(Dataset):
-    def __init__(self, md_path, window_size, stride=1, sigma_smooth=1.5):
+    def __init__(self, md_path, window_size, stride=1, sigma_smooth=1.5, velocity_npy_override=None):
         """
         Loads the MD trajectory and creates sliding windows of length `window_size`.
         Returns batches of shape: (window_size + 1, spatial_resolution)
+
+        velocity_npy_override: path to a precomputed (T, X) .npy array (e.g.
+            from scripts/tools/derive_pde_velocity.py) to use as v_traj
+            INSTEAD of the h5 'vz' field - None (default) preserves existing
+            behavior exactly. Still passed through the same Gaussian
+            smoothing as the default path for noise-characteristic
+            consistency between the two sources.
         """
         self.window_size = window_size
         self.stride = stride
@@ -30,18 +37,19 @@ class MDWindowDataset(Dataset):
 
         # Load and smooth data
         rho_list, v_list = [], []
-        for file_path in md_file_list:
+        v_override_traj = np.load(velocity_npy_override) if velocity_npy_override else None
+        for i, file_path in enumerate(md_file_list):
             with h5py.File(file_path, 'r') as f:
                 rho_raw = np.array(f['n']).flatten()
-                v_raw = np.array(f['vz']).flatten()
-                
+                v_raw = v_override_traj[i] if v_override_traj is not None else np.array(f['vz']).flatten()
+
                 # Apply Periodic Gaussian Smoothing
                 rho_smooth = gaussian_filter1d(rho_raw, sigma=sigma_smooth, mode='wrap')
                 v_smooth = gaussian_filter1d(v_raw, sigma=sigma_smooth, mode='wrap')
-                
+
                 rho_list.append(rho_smooth)
                 v_list.append(v_smooth)
-                
+
         # Stack into full trajectory tensors: Shape (Time, X)
         self.rho_traj = torch.tensor(np.stack(rho_list), dtype=torch.float32)
         self.v_traj = torch.tensor(np.stack(v_list), dtype=torch.float32)
@@ -106,16 +114,26 @@ class MultiPotentialMDDataset(Dataset):
                     "dataset must share the same spatial grid."
                 )
 
-    def __init__(self, md_paths, window_size, stride=1, sigma_smooth=1.5):
+    def __init__(self, md_paths, window_size, stride=1, sigma_smooth=1.5, velocity_npy_overrides=None):
+        """
+        velocity_npy_overrides: optional list, same length as md_paths, of
+        per-potential velocity_npy_override paths (or None entries to use
+        that potential's default h5 'vz' field) - see
+        MDWindowDataset.velocity_npy_override.
+        """
         if isinstance(md_paths, str):
             md_paths = [md_paths]
         if len(md_paths) == 0:
             raise ValueError("md_paths must contain at least one MD directory")
+        if velocity_npy_overrides is None:
+            velocity_npy_overrides = [None] * len(md_paths)
+        elif len(velocity_npy_overrides) != len(md_paths):
+            raise ValueError("velocity_npy_overrides must be the same length as md_paths")
 
         self.potential_names = [potential_name_from_path(p) for p in md_paths]
         self.datasets = [
-            MDWindowDataset(p, window_size, stride=stride, sigma_smooth=sigma_smooth)
-            for p in md_paths
+            MDWindowDataset(p, window_size, stride=stride, sigma_smooth=sigma_smooth, velocity_npy_override=ov)
+            for p, ov in zip(md_paths, velocity_npy_overrides)
         ]
 
         self._assert_consistent_grid(self.potential_names, self.datasets)

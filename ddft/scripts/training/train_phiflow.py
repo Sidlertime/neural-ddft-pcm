@@ -29,6 +29,7 @@ PARAM_SCHEME = {
     # One or more MD directories. Each becomes one "potential" in the mixed
     # training set; all must share the same spatial grid (asserted at load time).
     "md_paths": (list, ["../data/lj_data/ref_gaussian_langevin_01/avg_500/"]),
+    "velocity_npy_overrides": (list, None),      # Optional, same length as md_paths - per-potential precomputed velocity .npy to use instead of MD's measured vz (see derive_pde_velocity.py). None entries fall back to vz as normal.
     "base_model_path": (str, "models/c2_dz32.ckpt"),
     "sup_model_path": (str, None),
     "zimmermann_model_path": (str, None),
@@ -252,7 +253,7 @@ def main():
             param_group['lr'] = lr
             param_group['weight_decay'] = phase_weight_decay
 
-        full_dataset = MultiPotentialMDDataset(md_paths=args["md_paths"], window_size=window_size, stride=stride, sigma_smooth=3.0)
+        full_dataset = MultiPotentialMDDataset(md_paths=args["md_paths"], window_size=window_size, stride=stride, sigma_smooth=3.0, velocity_npy_overrides=args.get("velocity_npy_overrides"))
 
         # Pick one continuous chunk PER POTENTIAL for this phase (never a chunk
         # spanning two potentials), then combine them into one subset. If
