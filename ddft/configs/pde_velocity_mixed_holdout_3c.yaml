@@ -1,0 +1,39 @@
+# PDE-consistent-velocity cascade: mixed {gaussian,3a,3d} -> heldout 3c, diffusion_coeff=0.
+run_id: pde_velocity/mixed_holdout_3c_diffcoeff0
+seed: 42
+model_mode: hybrid
+md_paths: [../data/lj_data/ref_gaussian_langevin_01/avg_500/, ../data/lj_data/ref_3a_langevin_01/avg_2000/,
+  ../data/lj_data/ref_3d_langevin_01/avg_2000/]
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+model_kwargs: {use_vext: true, use_rho_prev: true, use_v_prev: true, use_accel: true,
+  use_gamma: true, use_eta: true}
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 0.0001
+weight_decay: 0.0
+loss_weight_v: 10.0
+noise_std: 0.001
+chunk_fraction: 1.0
+curriculum:
+- {epochs: 10, window_size: 2, batch_size: 8, lr: 0.001, stride: 1}
+- {epochs: 10, window_size: 2, batch_size: 8, lr: 0.001, stride: 1}
+- {epochs: 10, window_size: 2, batch_size: 8, lr: 0.001, stride: 1}
+- {epochs: 10, window_size: 2, batch_size: 8, lr: 0.001, stride: 1}
+- {epochs: 10, window_size: 2, batch_size: 8, lr: 0.001, stride: 1}
+- {epochs: 10, window_size: 5, batch_size: 8, lr: 0.0005, stride: 2}
+- {epochs: 10, window_size: 5, batch_size: 8, lr: 0.0005, stride: 2}
+- {epochs: 10, window_size: 5, batch_size: 8, lr: 0.0005, stride: 2}
+- {epochs: 10, window_size: 5, batch_size: 8, lr: 0.0005, stride: 2}
+- {epochs: 10, window_size: 15, batch_size: 4, lr: 0.0002, stride: 6}
+- {epochs: 10, window_size: 15, batch_size: 4, lr: 0.0002, stride: 6}
+- {epochs: 10, window_size: 15, batch_size: 4, lr: 0.0002, stride: 6}
+- {epochs: 20, window_size: 35, batch_size: 1, lr: 0.0001, stride: 15}
+- {epochs: 20, window_size: 35, batch_size: 1, lr: 0.0001, stride: 15}
+diffusion_coeff: 0.0
+velocity_npy_overrides: [results/diagnostics/pde_velocity_gaussian/v_derived.npy,
+  results/diagnostics/pde_velocity_3a/v_derived.npy, results/diagnostics/pde_velocity_3d/v_derived.npy]
