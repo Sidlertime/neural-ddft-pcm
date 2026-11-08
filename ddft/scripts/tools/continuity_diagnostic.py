@@ -123,6 +123,7 @@ def main():
     parser.add_argument("--frame_interval", type=float, default=0.01, help="Time between consecutive MD frames (project convention: save_interval=0.01)")
     parser.add_argument("--hold_velocity", choices=["start", "end", "average"], default="start")
     parser.add_argument("--diffusion_coeff", type=float, default=0.5, help="Artificial-diffusion coefficient (project default 0.5); 0.0 = exact physical continuity equation, no stabilization")
+    parser.add_argument("--velocity_npy_override", default=None, help="Path to a precomputed (T, X) .npy velocity array (e.g. from derive_pde_velocity.py) to use INSTEAD of the true MD vz - density (rho_traj) always stays the real MD density, so this tests whether the continuity-only integrator, driven by the DERIVED velocity, still reproduces the TRUE MD density trajectory to near-zero error on real data (not just the synthetic round-trip test in tests/test_pde_velocity_derivation.py)")
     parser.add_argument("--output_dir", default="results/diagnostics/continuity_check")
     args = parser.parse_args()
 
@@ -131,7 +132,7 @@ def main():
     # window_size is irrelevant here - only .rho_traj/.v_traj (the full,
     # Gaussian-smoothed trajectory, same smoothing the training/eval
     # pipeline treats as ground truth) are used, not the windowed __getitem__.
-    ds = MDWindowDataset(args.md_path, window_size=1)
+    ds = MDWindowDataset(args.md_path, window_size=1, velocity_npy_override=args.velocity_npy_override)
     rho_traj = ds.rho_traj.numpy()
     v_traj = ds.v_traj.numpy()
     dx = ds.dr
@@ -139,8 +140,10 @@ def main():
     domain_res = ds.domain_resolution
     n_substeps = max(1, builtins.round(args.frame_interval / args.dt))
 
+    velocity_source = f"DERIVED ({args.velocity_npy_override})" if args.velocity_npy_override else "true MD vz"
     print(f"Loaded {rho_traj.shape[0]} frames, domain_res={domain_res}, box_length={box_length:.4f}, dx={dx:.5f}")
     print(f"Substepped variant: dt={args.dt}, {n_substeps} sub-steps per {args.frame_interval}-time-unit frame interval")
+    print(f"Velocity source: {velocity_source}")
     print(f"Velocity held via: '{args.hold_velocity}', artificial-diffusion coefficient: {args.diffusion_coeff}\n")
 
     substepped = run_variant(rho_traj, v_traj, dx, box_length, domain_res,
@@ -177,7 +180,7 @@ def main():
     ax.axhline(reference_scale_mse, color="gray", linestyle=":", label="MD's own frame-to-frame change (reference scale)")
     ax.set_xlabel("Time")
     ax.set_ylabel("Density MSE (predicted vs. true next frame)")
-    ax.set_title(f"Continuity-only integrator error vs. time (diffusion_coeff={args.diffusion_coeff})\n{args.md_path}")
+    ax.set_title(f"Continuity-only integrator error vs. time (diffusion_coeff={args.diffusion_coeff}, v={velocity_source})\n{args.md_path}")
     ax.set_yscale("log")
     ax.legend()
     ax.grid(True, linestyle=":", alpha=0.6)
