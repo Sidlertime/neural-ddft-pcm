@@ -44,35 +44,41 @@ from phi.torch.flow import *
 from neural_ddft.data.dataset import MDWindowDataset
 
 
-def continuity_step(rho_grid, v_grid, dt, dx):
+def continuity_step(rho_grid, v_grid, dt, dx, diffusion_coeff=0.5):
     """
     Mirrors phiflow_pde.py:PhiFlowDDFT.step()'s EQUATION 1 (continuity)
     exactly - kept in sync by hand since this is a standalone diagnostic,
     not a production code path. No gamma/eta/m/kBT/force term anywhere in
     here, by construction (same as the real implementation).
+
+    diffusion_coeff: the project hardcodes this at 0.5 (D_art = 0.5*dx*|v|),
+    a pure numerical-stabilization term with no physical basis (not part of
+    the true continuity equation) - exposed here so its own contribution to
+    the integrator error measured by this script can be isolated. 0.0
+    reproduces the exact physical equation with no artificial diffusion at all.
     """
     rho_faces = rho_grid.at(v_grid)
     flux_centered = rho_faces * v_grid
     grad_rho = field.spatial_gradient(rho_grid)
-    D_art = 0.5 * dx * math.abs(v_grid)
+    D_art = diffusion_coeff * dx * math.abs(v_grid)
     flux_diffusive = -D_art * grad_rho
     total_flux = flux_centered + flux_diffusive
     rho_next = rho_grid - dt * field.divergence(total_flux)
     return rho_next.with_values(math.maximum(rho_next.values, 1e-6))
 
 
-def rollout_one_frame(rho_start, v_np, dt, n_substeps, domain_res, box_length):
+def rollout_one_frame(rho_start, v_np, dt, n_substeps, domain_res, box_length, diffusion_coeff=0.5):
     v_grid = StaggeredGrid(
         math.tensor(v_np.astype(np.float32), spatial('x')),
         extrapolation.PERIODIC, x=domain_res, bounds=Box(x=box_length),
     )
     rho_current = rho_start
     for _ in range(n_substeps):
-        rho_current = continuity_step(rho_current, v_grid, dt, box_length / domain_res)
+        rho_current = continuity_step(rho_current, v_grid, dt, box_length / domain_res, diffusion_coeff)
     return rho_current
 
 
-def run_variant(rho_traj, v_traj, dx, box_length, domain_res, dt, n_substeps, hold_velocity):
+def run_variant(rho_traj, v_traj, dx, box_length, domain_res, dt, n_substeps, hold_velocity, diffusion_coeff=0.5):
     """
     hold_velocity: "start" (v[t], the only choice with a real physical
     rationale when sub-stepping with no finer-grained velocity available),
@@ -96,7 +102,7 @@ def run_variant(rho_traj, v_traj, dx, box_length, domain_res, dt, n_substeps, ho
         else:
             raise ValueError(f"Unknown hold_velocity mode: {hold_velocity}")
 
-        rho_pred_grid = rollout_one_frame(rho_start, v_np, dt, n_substeps, domain_res, box_length)
+        rho_pred_grid = rollout_one_frame(rho_start, v_np, dt, n_substeps, domain_res, box_length, diffusion_coeff)
         pred = rho_pred_grid.values.native('x').cpu().numpy()
         target = rho_traj[t + 1]
         diff = pred - target
@@ -116,6 +122,7 @@ def main():
     parser.add_argument("--dt", type=float, default=1e-4, help="Physical integration dt (project default 1e-4)")
     parser.add_argument("--frame_interval", type=float, default=0.01, help="Time between consecutive MD frames (project convention: save_interval=0.01)")
     parser.add_argument("--hold_velocity", choices=["start", "end", "average"], default="start")
+    parser.add_argument("--diffusion_coeff", type=float, default=0.5, help="Artificial-diffusion coefficient (project default 0.5); 0.0 = exact physical continuity equation, no stabilization")
     parser.add_argument("--output_dir", default="results/diagnostics/continuity_check")
     args = parser.parse_args()
 
@@ -134,12 +141,14 @@ def main():
 
     print(f"Loaded {rho_traj.shape[0]} frames, domain_res={domain_res}, box_length={box_length:.4f}, dx={dx:.5f}")
     print(f"Substepped variant: dt={args.dt}, {n_substeps} sub-steps per {args.frame_interval}-time-unit frame interval")
-    print(f"Velocity held via: '{args.hold_velocity}'\n")
+    print(f"Velocity held via: '{args.hold_velocity}', artificial-diffusion coefficient: {args.diffusion_coeff}\n")
 
     substepped = run_variant(rho_traj, v_traj, dx, box_length, domain_res,
-                              dt=args.dt, n_substeps=n_substeps, hold_velocity=args.hold_velocity)
+                              dt=args.dt, n_substeps=n_substeps, hold_velocity=args.hold_velocity,
+                              diffusion_coeff=args.diffusion_coeff)
     single_step = run_variant(rho_traj, v_traj, dx, box_length, domain_res,
-                               dt=args.frame_interval, n_substeps=1, hold_velocity=args.hold_velocity)
+                               dt=args.frame_interval, n_substeps=1, hold_velocity=args.hold_velocity,
+                               diffusion_coeff=args.diffusion_coeff)
 
     for name, result in [("substepped (dt matches real sim)", substepped), ("single_step (crude, dt=frame_interval)", single_step)]:
         print(f"--- {name} ---")
@@ -168,7 +177,7 @@ def main():
     ax.axhline(reference_scale_mse, color="gray", linestyle=":", label="MD's own frame-to-frame change (reference scale)")
     ax.set_xlabel("Time")
     ax.set_ylabel("Density MSE (predicted vs. true next frame)")
-    ax.set_title(f"Continuity-only integrator error vs. time\n{args.md_path}")
+    ax.set_title(f"Continuity-only integrator error vs. time (diffusion_coeff={args.diffusion_coeff})\n{args.md_path}")
     ax.set_yscale("log")
     ax.legend()
     ax.grid(True, linestyle=":", alpha=0.6)
