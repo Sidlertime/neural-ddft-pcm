@@ -45,6 +45,7 @@ PARAM_SCHEME = {
     "eta": (float, 0.67),                       # Shear viscosity (LJ units)
     "dt": (float, 1e-4),
     "rho_floor": (float, 1e-6),                 # Density clamp floor - viscosity/pressure terms scale as 1/rho, so this controls how extreme they can get as density erodes
+    "diffusion_coeff": (float, 0.5),             # Artificial-diffusion stabilization coefficient (D_art = diffusion_coeff*dx*|v|) in the continuity step - pure numerics, not physical; default preserves original hardcoded behavior exactly
 
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
@@ -92,12 +93,13 @@ def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, conf
     eta = config["eta"]
     kBT = config["k"] * config["T"]
     rho_floor = config.get("rho_floor", 1e-6)
+    diffusion_coeff = config.get("diffusion_coeff", 0.5)
 
     # 1. Continuity: ∂ρ/∂t = -∇(ρv)
     rho_faces = rho.at(v)
     flux_centered = rho_faces * v
     grad_rho = field.spatial_gradient(rho)
-    D_art = 0.5 * dx * math.abs(v)
+    D_art = diffusion_coeff * dx * math.abs(v)
     total_flux = flux_centered - D_art * grad_rho
 
     rho_next = rho - dt * field.divergence(total_flux)

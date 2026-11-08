@@ -26,6 +26,7 @@ class PhiFlowDDFT:
         self.kBT = float(config.get("k", 1.0)) * float(config.get("T", 2.0))
         self.dt = float(config.get("dt", 1e-4))
         self.rho_floor = float(config.get("rho_floor", 1e-6))
+        self.diffusion_coeff = float(config.get("diffusion_coeff", 0.5))
 
     def _ensure_device(self, grid):
         if grid is None:
@@ -67,7 +68,7 @@ class PhiFlowDDFT:
         # Calculate dynamic Artificial Diffusion to kill the wobble (Upwind stabilization)
         # This precisely targets steep gradients and shocks.
         grad_rho = field.spatial_gradient(rho)      # Lives on the faces (Staggered)
-        D_art = 0.5 * self.dx * math.abs(v)         # Diffusion coeff based on local velocity
+        D_art = self.diffusion_coeff * self.dx * math.abs(v)  # Diffusion coeff based on local velocity
         flux_diffusive = - D_art * grad_rho         # Diffusive flux flows down the gradient
         
         # 3. Combine fluxes for a stable, mass-conserving Upwind Flux
