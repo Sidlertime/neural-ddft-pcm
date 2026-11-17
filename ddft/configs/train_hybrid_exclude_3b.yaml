@@ -1,6 +1,4 @@
-# Exclude-ref_3b multi-potential hybrid training (see
-# docs/ai_planning/2026-11-05_initialization_report.md and the plan that
-# produced this run for context).
+# Exclude-ref_3b multi-potential hybrid training.
 #
 # ref_3b was found to be a chronic outlier in the full-5-potential smoke run
 # (results/2026-11-05_smoke_stage_multi_potential_hybrid_01) - its force

@@ -1,6 +1,6 @@
 # Short-curriculum clone of v7a (train_hybrid_3a_only_v7a_lw10.yaml), for a
 # quick eta-sensitivity check (2026-11-08): does the new Green-Kubo eta
-# estimate (0.8053+/-0.0698, see reference_mdext_ddft.md) change training
+# estimate (0.8053+/-0.0698, Green-Kubo, 16 replicas) change training
 # behavior or trained-model predictions enough to warrant redoing the full
 # project sweep? Truncated to ~1/6 the epoch count of v7a but still covers
 # all 4 window sizes (2/5/15/35) since several project findings show

@@ -5,7 +5,7 @@
 # window_size=35. We know chunk_fraction=1.0 helped 3d survive LONGER when
 # MIXED (sim_time 2.23 -> 2.77) - this tests whether the same fix helps
 # 3d in full isolation. Vector-force (not scalar-potential, given
-# tonight's stability findings with that variant), otherwise identical
+# the stability findings with that variant), otherwise identical
 # recipe to full_trajectory_sampling_3a.yaml.
 run_id: full_trajectory_3d_only/train
 seed: 42

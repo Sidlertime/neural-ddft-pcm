@@ -1,5 +1,4 @@
-# Mixed multi-potential hybrid training (Neural DDFT milestone, see
-# docs/ai_planning/2026-11-05_initialization_report.md).
+# Mixed multi-potential hybrid training (Neural DDFT milestone).
 #
 # Trains the SuperadiabaticNet correction on a dataset mixing the Gaussian
 # well and all four Karnik reference potentials simultaneously, instead of
@@ -47,7 +46,7 @@ curriculum:
   - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
   - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
   - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
-  # medium horizon - stops at window 15 per _project_summary.md Attempt 6:
+  # medium horizon - stops at window 15 (earlier attempt):
   # window 35 caused gradient interference from thermal noise and flatlined learning.
   - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
   - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}

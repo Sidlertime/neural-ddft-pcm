@@ -48,8 +48,8 @@ def _run_roundtrip_check(diffusion_coeff):
 
 def test_velocity_derivation_roundtrip_zero_diffusion():
     """
-    Primary expected case (diffusion_coeff=0, the "most physical" setting
-    per the user's own framing): a direct division, should recover the true
+    Primary expected case (diffusion_coeff=0, the "most physical" setting): a direct division,
+    should recover the true
     velocity to near machine precision.
     """
     _run_roundtrip_check(diffusion_coeff=0.0)

@@ -12,7 +12,7 @@
 # inside PowerFunctionalNet.forward() fixes this for accel specifically, but
 # dropping it entirely for this first baseline run keeps the test as clean
 # as possible. This is the ONE controlled comparison deciding whether to
-# invest further - see weekend plan / power_functional_architecture.md memory.
+# invest further.
 run_id: power_functional_3a
 seed: 42
 model_mode: hybrid_power

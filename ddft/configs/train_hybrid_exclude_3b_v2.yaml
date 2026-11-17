@@ -7,7 +7,7 @@
 # results/2026-10-30_train_grad_quarter_hybrid_01 (the one proven success,
 # force_ratio reaches 0.24 and still climbing) - identical configs except
 # noise_std: 0.01 vs 0.001. v1 used 0.01 (the multi_potential.yaml default,
-# i.e. the known-bad value per _project_summary.md's Attempt 2 finding).
+# i.e. the known-bad value from an earlier attempt).
 #
 # This version: noise_std=0.001, and window_size=35 restored (the phase
 # where grad_quarter's force_ratio did almost all its growth, 0.03 -> 0.24 -

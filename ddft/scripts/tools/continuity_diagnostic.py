@@ -37,9 +37,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from phi.torch.flow import *
 # from phi.torch.flow import * shadows Python's builtin round() with PhiFlow's
-# own (single-argument) round_ - see force_factory.py's identical fix and
-# memory feedback_eval_template_flag_drift.md / scalar_potential_architecture.md
-# for the history of this exact gotcha. Use builtins.round below.
+# own (single-argument) round_ - see force_factory.py's identical fix.
+# Use builtins.round below.
 
 from neural_ddft.data.dataset import MDWindowDataset
 

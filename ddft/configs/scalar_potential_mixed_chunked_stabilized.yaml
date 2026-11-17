@@ -1,7 +1,6 @@
 # Stabilized retest of scalar_potential_mixed_chunked.yaml, which went to
 # exact NaN weights at epoch 125 (5 epochs into window_size=35) - the
-# THIRD independent NaN-at-window_size=35-onset incident tonight (see
-# memory scalar_potential_architecture.md and feedback_warmstart_nan_gap).
+# THIRD independent NaN-at-window_size=35-onset incident).
 # Partial (epoch-120) results from that run were much better than the
 # surviving baseline scalar-potential config, especially heldout
 # generalization (beat the complete vector-force mixed_potential_v2 run by

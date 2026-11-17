@@ -50,8 +50,7 @@ def _smooth_periodic(x_bt, sigma, device):
     conditions matching this codebase's domain convention. Used to tame the
     use_potential_output path: a direct, deterministic countermeasure to the
     hypothesis that spatial_gradient amplifies whatever high-frequency
-    content is present in the raw network output (see memory:
-    scalar_potential_architecture.md) - smoothing it first removes that
+    content is present in the raw network output - smoothing it first removes that
     content before it gets amplified, at zero learned-parameter cost.
     """
     if sigma <= 0:
@@ -261,7 +260,7 @@ def get_hybrid_power_force(rho_grid, v_grid, base_model, power_model, dx, device
         dPdv_tensor = dPdv_tensor.detach()
 
     # f_sup = -(1/rho) dP^ex/dv reintroduces the exact 1/rho singularity
-    # mechanism root-caused for 3b/3d (weekend_ablation_sweep.md Round 6:
+    # mechanism root-caused for 3b/3d (the
     # viscosity/pressure terms blow up as rho erodes toward its floor) -
     # clamp defensively from day one. This is a local safety clamp only
     # (not wired to the project's configurable rho_floor, which lives in

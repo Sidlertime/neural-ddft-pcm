@@ -343,8 +343,7 @@ def test_potential_smoothing_reduces_high_frequency_content_and_preserves_gradie
     Validates the potential_smooth_sigma countermeasure (force_factory.py:
     _smooth_periodic) added after the scalar-potential variant went to NaN
     weights at the same epoch (125, start of window_size=35) under both
-    full-trajectory-coverage and multi-potential mixing - see memory
-    scalar_potential_architecture.md. Checks two things a real fix needs:
+    full-trajectory-coverage and multi-potential mixing. Checks two things a real fix needs:
     (1) it actually suppresses high-frequency content (not a no-op), tested
     directly on an alternating +1/-1 signal, the sharpest possible spatial
     frequency on this grid - a working Gaussian blur must pull this toward

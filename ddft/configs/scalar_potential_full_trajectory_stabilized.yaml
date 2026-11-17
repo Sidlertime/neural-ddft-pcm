@@ -1,8 +1,7 @@
 # Stabilized retest of scalar_potential_full_trajectory.yaml (single-
 # potential 3a, chunk_fraction=1.0), which went to exact NaN weights at
 # epoch 125 (5 epochs into window_size=35) - the SECOND of three
-# independent NaN-at-window_size=35-onset incidents tonight (see memory
-# scalar_potential_architecture.md and feedback_warmstart_nan_gap).
+# independent NaN-at-window_size=35-onset incidents).
 # Partial (epoch-120) results from that run were notably better than the
 # surviving baseline (restricted-chunk) scalar-potential config on
 # density (+25.4% vs +206.2%), echoing the same full-coverage-helps-
