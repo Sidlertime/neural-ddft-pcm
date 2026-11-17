@@ -1,0 +1,45 @@
+# New potential: mg1 (mixed-gaussian, 2-well asymmetric), generated this
+# session via lj.py --h5_file mg1.h5 (InterpolatedPotential), trials=500,
+# gamma=0.1/Tdamp=10 (production value, same as gaussian/3a-3d). Same
+# 320-pt/dz=1/32 grid. Same proven-good single-potential recipe as
+# channel_ablation_3a_base.yaml/lj_sharp_base.yaml: weight_decay=0,
+# noise_std=0.001, loss_weight_v=10, same 14-phase curriculum.
+run_id: mg1_base
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_mg1_langevin_01/avg_500/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs: {}
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+
+weight_decay: 0.0
+loss_weight_v: 10.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 15, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}
+  - {epochs: 20, window_size: 35, batch_size: 1, lr: 1.0e-4, stride: 15}

@@ -1,0 +1,10 @@
+model_mode: hybrid
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: results/single_potential_v7_v8/train/2026-11-06_train_3a_only_v7a_lw10_hybrid_01/checkpoints/hybrid_epoch_160.ckpt
