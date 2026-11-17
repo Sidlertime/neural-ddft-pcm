@@ -5,7 +5,7 @@ Scripts and modules superseded by the PhiFlow-based pipeline (`scripts/training/
 
 - `scripts/evaluation/{ddft_fmt,ddft_neural_closed*,pypde_eval}.py`, `scripts/training/train_ddft_phiflow.py`,
   `scripts/tools/ddft_debug.py` — depend on the old `py-pde` library, replaced because `py-pde` was unstable
-  for friction coefficients (`gamma`) below 2 (see `DEV_STATE.md`).
+  for friction coefficients (`gamma`) below 2.
 - `scripts/training/train_ddft_pft_hybrid.py` — an earlier PhiFlow-based trainer predating the unified
   curriculum trainer in `train_phiflow.py` (no curriculum/config support).
 - `src/neural_ddft/physics/fmt/` — classical Fundamental Measure Theory free-energy functional, used only
