@@ -7,10 +7,15 @@ negative is better. Rows with several seeds give mean +/- standard deviation.
 If a run diverged, both runs are compared over the same shortened time window
 (marked with a dagger and the end time).
 
+Predicted and MD frames are paired by time. The submitted report paired them
+by index, i.e. one frame (0.01 tau) too early; --report_pairing reproduces
+the report values exactly. The difference is about 0.5-1.5 percentage points.
+
 Examples (run from neural-ddft-pcm/ddft):
     python scripts/reproduce/tables.py                      # all tables, Markdown
     python scripts/reproduce/tables.py --tables self inputs
     python scripts/reproduce/tables.py --latex > tables.tex
+    python scripts/reproduce/tables.py --report_pairing     # values as in the report
 """
 import argparse
 
@@ -28,14 +33,14 @@ def fmt(values, latex=False):
     return f"${s.replace('%', r'\%')}$" if latex else s
 
 
-def row_values(manifest, row):
+def row_values(manifest, row, pairing="time"):
     """(d_rho list, d_v list, note) for one table row, or None if evaluations are missing."""
     d = manifest["defaults"]
     base = row.baseline.out_dir(d)
     if not X.is_done(row.baseline, manifest) or not all(X.is_done(e, manifest) for e in row.evaluations):
         return None
     md = paths.md_dir(row.target, row.baseline.gamma)
-    res = [relative_change(e.out_dir(d), base, md) for e in row.evaluations]
+    res = [relative_change(e.out_dir(d), base, md, pairing=pairing) for e in row.evaluations]
     notes = []
     t_end = min(r["t_end"] for r in res)
     reasons = [X.stop_reason(e.out_dir(d)) for e in row.evaluations]
@@ -55,6 +60,8 @@ def main():
     p.add_argument("--manifest", default=X.DEFAULT_MANIFEST)
     p.add_argument("--tables", nargs="*", help="table names (default: all)")
     p.add_argument("--latex", action="store_true", help="LaTeX tabular rows instead of Markdown")
+    p.add_argument("--report_pairing", action="store_true",
+                   help="pair frames by index as in the submitted report (one frame early)")
     args = p.parse_args()
 
     manifest = X.load(args.manifest)
@@ -63,7 +70,7 @@ def main():
         if not args.latex:
             print("| Row | Δρ | Δv | Note |\n|---|---|---|---|")
         for row in X.table_rows(manifest, table):
-            vals = row_values(manifest, row)
+            vals = row_values(manifest, row, "index" if args.report_pairing else "time")
             if vals is None:
                 cells = ["(missing evaluation)", "", ""]
             else:

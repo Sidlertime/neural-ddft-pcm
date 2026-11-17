@@ -58,9 +58,19 @@ def compute_metrics(pred, target):
     return {"mae": mae, "mse": mse, "linf": linf}
 
 
-def evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=False, max_steps=None):
+FRAME_INTERVAL = 0.01  # time between saved MD frames (tau)
+
+
+def evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=False, max_steps=None, pairing="time"):
     """
     Evaluates one prediction directory against reference data.
+
+    pairing (MD reference only): how predicted frames are matched to MD frames.
+      "time"  (default): the prediction saved at time t is compared with MD frame
+              round(t / FRAME_INTERVAL). Correct, since evaluations start from MD frame 0.
+      "index": the i-th saved prediction (t = 0.01 * (i + 1)) is compared with MD
+              frame i, i.e. one frame (0.01 tau) too early. This is how the report
+              values were computed; kept to reproduce them exactly.
     """
     pred_rho = load_npy_series(pred_dir, prefix="rho")
     pred_v = load_npy_series(pred_dir, prefix="v")
@@ -73,17 +83,24 @@ def evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=False, max_ste
         _, ref_rho_arr, ref_v_arr, r_grid = load_md_series(ref_dir_or_md)
         if ref_rho_arr is None or len(ref_rho_arr) == 0:
             raise FileNotFoundError(f"No MD collection files found in ref path: {ref_dir_or_md}")
-        n_frames = min(len(pred_rho), len(ref_rho_arr))
+        if pairing == "index":
+            pairs = [(i, i) for i in range(min(len(pred_rho), len(ref_rho_arr)))]
+        elif pairing == "time":
+            pairs = [(i, int(round(t / FRAME_INTERVAL))) for i, (t, _) in enumerate(pred_rho)]
+            pairs = [(i, k) for i, k in pairs if 0 <= k < len(ref_rho_arr)]
+        else:
+            raise ValueError(f"pairing must be 'time' or 'index', got {pairing!r}")
         if max_steps is not None:
-            n_frames = min(n_frames, max_steps)
+            pairs = pairs[:max_steps]
+        pi, mi = [p for p, _ in pairs], [m for _, m in pairs]
 
-        times = np.array([pred_rho[i][0] for i in range(n_frames)])
-        p_rho = np.array([pred_rho[i][1] for i in range(n_frames)])
-        t_rho = ref_rho_arr[:n_frames]
+        times = np.array([pred_rho[i][0] for i in pi])
+        p_rho = np.array([pred_rho[i][1] for i in pi])
+        t_rho = ref_rho_arr[mi]
 
-        has_v = (len(pred_v) >= n_frames) and (ref_v_arr is not None and len(ref_v_arr) >= n_frames)
-        p_v = np.array([pred_v[i][1] for i in range(n_frames)]) if has_v else None
-        t_v = ref_v_arr[:n_frames] if has_v else None
+        has_v = (len(pred_v) >= len(pred_rho)) and (ref_v_arr is not None and len(ref_v_arr) == len(ref_rho_arr))
+        p_v = np.array([pred_v[i][1] for i in pi]) if has_v else None
+        t_v = ref_v_arr[mi] if has_v else None
     else:
         ref_rho = load_npy_series(ref_dir_or_md, prefix="rho")
         ref_v = load_npy_series(ref_dir_or_md, prefix="v")
@@ -168,7 +185,7 @@ def evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=False, max_ste
     return report
 
 
-def summarize_run(pred_dir, ref_dir_or_md=None, is_ref_md=False, max_steps=None):
+def summarize_run(pred_dir, ref_dir_or_md=None, is_ref_md=False, max_steps=None, pairing="time"):
     """
     Thin wrapper returning only the JSON-serializable subset of
     evaluate_single_prediction's report (density_metrics/velocity_metrics),
@@ -176,7 +193,7 @@ def summarize_run(pred_dir, ref_dir_or_md=None, is_ref_md=False, max_steps=None)
     """
     if ref_dir_or_md is None:
         return None
-    rep = evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=is_ref_md, max_steps=max_steps)
+    rep = evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=is_ref_md, max_steps=max_steps, pairing=pairing)
     return {"density_metrics": rep["density_metrics"], "velocity_metrics": rep.get("velocity_metrics")}
 
 
@@ -184,20 +201,20 @@ def summarize_run(pred_dir, ref_dir_or_md=None, is_ref_md=False, max_steps=None)
 # Trajectory RMSE and relative change vs. a baseline (report metrics)
 # ---------------------------------------------------------------------------
 
-def per_frame_rmse(pred_dir, md_dir, max_steps=None):
+def per_frame_rmse(pred_dir, md_dir, max_steps=None, pairing="time"):
     """Per saved frame RMSE of density and velocity vs. MD: (times, rmse_rho, rmse_v)."""
-    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps)
+    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps, pairing=pairing)
     rmse_rho = np.sqrt([m["mse"] for m in rep["per_step_rho"]])
     rmse_v = np.sqrt([m["mse"] for m in rep["per_step_v"]]) if "per_step_v" in rep else None
     return rep["times"], rmse_rho, rmse_v
 
 
-def trajectory_rmse(pred_dir, md_dir, max_steps=None):
+def trajectory_rmse(pred_dir, md_dir, max_steps=None, pairing="time"):
     """
     Trajectory RMSE vs. MD: root of the mean squared error over all saved frames
     and grid points, for density and velocity.
     """
-    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps)
+    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps, pairing=pairing)
     v = rep.get("velocity_metrics")
     return {
         "rho": float(np.sqrt(rep["density_metrics"]["overall_mse"])),
@@ -212,7 +229,7 @@ def n_saved_frames(pred_dir):
     return len(load_npy_series(pred_dir, prefix="rho"))
 
 
-def relative_change(model_dir, baseline_dir, md_dir):
+def relative_change(model_dir, baseline_dir, md_dir, pairing="time"):
     """
     Relative change of the trajectory RMSE of a model vs. a baseline (e.g. the
     PCM-only model) on the same MD data, Delta = (RMSE_model - RMSE_base) / RMSE_base.
@@ -222,9 +239,9 @@ def relative_change(model_dir, baseline_dir, md_dir):
     shortened time window; `time_matched` and `t_end` report this.
     """
     n = min(n_saved_frames(model_dir), n_saved_frames(baseline_dir))
-    model = trajectory_rmse(model_dir, md_dir, max_steps=n)
-    base = trajectory_rmse(baseline_dir, md_dir, max_steps=n)
-    full = trajectory_rmse(baseline_dir, md_dir)["n_frames"]
+    model = trajectory_rmse(model_dir, md_dir, max_steps=n, pairing=pairing)
+    base = trajectory_rmse(baseline_dir, md_dir, max_steps=n, pairing=pairing)
+    full = trajectory_rmse(baseline_dir, md_dir, pairing=pairing)["n_frames"]
     return {
         "d_rho": (model["rho"] - base["rho"]) / base["rho"],
         "d_v": (model["v"] - base["v"]) / base["v"] if model["v"] is not None and base["v"] else None,

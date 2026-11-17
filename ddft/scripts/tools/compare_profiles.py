@@ -104,6 +104,8 @@ def main():
     parser.add_argument("--ref", type=str, required=True, help="Reference folder (.npy files) or MD folder (.h5 files)")
     parser.add_argument("--is_md", action="store_true", help="Set this flag if --ref points to an MD collection folder with .h5 files")
     parser.add_argument("--max_steps", type=int, default=None, help="Optional limit on number of time frames evaluated")
+    parser.add_argument("--pairing", choices=["time", "index"], default="time",
+                        help="match predicted and MD frames by time (default) or by index (as in the submitted report, one frame early)")
     parser.add_argument("--plot", action="store_true", help="Generate comparative plots for profiles and errors")
     parser.add_argument("--plot_dir", type=str, default="results/comparison_plots", help="Directory to save generated plots")
     parser.add_argument("--out", type=str, default=None, help="Optional path to write overall JSON summary")
@@ -125,7 +127,7 @@ def main():
     json_summary = {}
 
     for pred_dir, label in zip(pred_dirs, labels):
-        rep = evaluate_single_prediction(pred_dir, args.ref, is_ref_md=args.is_md, max_steps=args.max_steps)
+        rep = evaluate_single_prediction(pred_dir, args.ref, is_ref_md=args.is_md, max_steps=args.max_steps, pairing=args.pairing)
         reports.append(rep)
 
         rho_mse = rep["density_metrics"]["overall_mse"]
