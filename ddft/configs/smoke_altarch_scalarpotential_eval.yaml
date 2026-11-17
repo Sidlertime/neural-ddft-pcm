@@ -1,0 +1,10 @@
+model_mode: hybrid
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+  use_potential_output: true
+base_model_path: models/c2_dz32.ckpt

@@ -1,0 +1,47 @@
+# 30-min smoke test, fixed pipeline: PowerFunctionalNet (model_mode:
+# hybrid_power, "PFT approach" - predicts a true scalar excess power
+# functional P^ex[rho,v], force recovered via f_sup=-(1/rho)*dP^ex/dv) on
+# 3a, under force_alpha=1.0/frame_interval=0.01 (the nightshift fix) for the
+# first time - the only prior power-functional result
+# ("flat vs equilibrium") was trained
+# under the pre-fix bug. Short curriculum (2 phases, 10 epochs total) to
+# fit a 30-min combined budget alongside the scalar-potential and
+# Zimmermann smoke tests. use_accel omitted (confirmed in the original test
+# to overflow to NaN under this architecture's double-backward).
+run_id: smoke_altarch/power_3a
+seed: 42
+model_mode: hybrid_power
+
+md_paths:
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+power_model_path: null
+
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: false
+  use_gamma: true
+  use_eta: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+force_alpha: 1.0
+frame_interval: 0.01
+
+weight_decay: 0.0
+loss_weight_v: 10.0
+loss_weight_rho: 1.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 5, window_size: 1, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 5, window_size: 2, batch_size: 8, lr: 5.0e-4, stride: 2}

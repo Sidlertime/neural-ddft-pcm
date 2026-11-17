@@ -1,0 +1,38 @@
+# 30-min smoke test, fixed pipeline: ZimmermannNet (model_mode: zimmermann)
+# on 3a, under force_alpha=1.0/frame_interval=0.01 for the first time - the
+# only prior post-weight_decay-fix Zimmermann result
+# ("large destabilizing correction,
+# 3-30x worse") was trained under the pre-fix bug AND used a 561-pt window
+# wider than this project's box (that architecture issue is unrelated to
+# the timestep fix and will still apply here). Short curriculum (2 phases,
+# 10 epochs total) to fit a 30-min combined budget alongside the power-
+# functional and scalar-potential smoke tests. No model_kwargs - ZimmermannNet
+# takes no optional-channel config.
+run_id: smoke_altarch/zimmermann_3a
+seed: 42
+model_mode: zimmermann
+
+md_paths:
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+force_alpha: 1.0
+frame_interval: 0.01
+
+weight_decay: 0.0
+loss_weight_v: 10.0
+loss_weight_rho: 1.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 5, window_size: 1, batch_size: 1, lr: 1.0e-3, stride: 1}
+  - {epochs: 5, window_size: 2, batch_size: 1, lr: 5.0e-4, stride: 2}
