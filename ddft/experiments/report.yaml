@@ -127,3 +127,9 @@ tables:
     rows:
       - {model: alternative_outputs/scalar_potential_3a, target: 3a, t_range: 1.0, label: "scalar potential"}
       - {model: alternative_outputs/power_functional_3a, target: 3a, t_range: 1.0, label: "power functional"}
+
+# Evaluations used only by figures (scripts/reproduce/figures.py).
+figures_extra:
+  - {target: 3a, diffusion_coeff: 0.0}     # artificial-diffusion figure (appendix), PCM-only
+  - {target: 3d, diffusion_coeff: 0.0}
+  - {target: 3d}
