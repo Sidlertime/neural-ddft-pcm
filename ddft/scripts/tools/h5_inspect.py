@@ -1,3 +1,8 @@
+"""Print the structure of an HDF5 file (datasets, shapes, Keras model config), e.g. an MD frame or a .keras model.
+
+Usage: python scripts/tools/h5_inspect.py <file.h5> [<file2.h5> ...]
+"""
+import sys
 import h5py
 import json
 
@@ -27,5 +32,8 @@ def inspect_h5_structure(file_path):
     except FileNotFoundError:
         print(f"Error: Could not find the file '{file_path}'.")
 
-# Replace with the actual path to the downloaded model
-inspect_h5_structure('NeuralForceFunctional.keras')
+if __name__ == "__main__":
+    if len(sys.argv) < 2:
+        sys.exit(__doc__)
+    for path in sys.argv[1:]:
+        inspect_h5_structure(path)

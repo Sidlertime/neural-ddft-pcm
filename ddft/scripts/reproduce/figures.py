@@ -8,7 +8,7 @@ Examples (run from neural-ddft-pcm/ddft):
     python scripts/reproduce/figures.py --out_dir my_figures
 
 The solver comparison (PhiFlow / pseudo-spectral / py-pde) is made with
-scripts/evaluation/plot_3solver_error.py.
+scripts/evaluation/compare_runs.py (see the README).
 """
 import argparse
 import os
