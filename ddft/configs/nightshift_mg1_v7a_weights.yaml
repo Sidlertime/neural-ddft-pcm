@@ -1,0 +1,49 @@
+# Nightshift fix verification, Arm A: reproduce v7a's exact recipe
+# (full 6-channel model_kwargs, weight_decay=0, loss_weight_rho=1/v=10,
+# noise_std=1e-3) but with the time-alignment + alpha fix applied
+# (force_alpha=1.0, frame_interval=0.01 -> n_sub=100 substeps/frame).
+# Frame curriculum (1->2->5->10 frames) per nightshift_prompt_timestep_fix.md's
+# cost estimate (~2-3h), NOT the old window_size=2/5/15/35 curriculum - that
+# would take ~5-6h per potential now that each frame costs 100x more compute.
+run_id: nightshift/mg1_v7a_weights
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_mg1_langevin_01/avg_500/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+force_alpha: 1.0
+frame_interval: 0.01
+
+weight_decay: 0.0
+loss_weight_v: 10.0
+loss_weight_rho: 1.0
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 1, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 1, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 5, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 10, batch_size: 2, lr: 1.0e-4, stride: 10}
+  - {epochs: 10, window_size: 10, batch_size: 2, lr: 1.0e-4, stride: 10}
