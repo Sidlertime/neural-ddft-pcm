@@ -334,6 +334,188 @@ def plot_movie_multiple(output_path, ddft_configs=None, md_configs=None,
     plt.close(fig)
 
 
+def _nearest_ddft_frame(sim, t):
+    """
+    Finds the file (and its own embedded time, parsed from the
+    "{name}{time:06.3f}.npy" naming convention) closest to requested time t,
+    for a single-source lookup (not an animation index) - used by
+    plot_sliced_snapshots below. Returns (actual_time, index) or (None, None)
+    if sim has no frames.
+    """
+    if sim.frames == 0:
+        return None, None
+    file_times = [float(os.path.basename(f)[3:-4]) for f in sim.rho_files]
+    idx = min(range(len(file_times)), key=lambda i: abs(file_times[i] - t))
+    return file_times[idx], idx
+
+
+def plot_sliced_snapshots(output_path, ddft_configs=None, md_configs=None,
+                           timesteps=None, t_start=None, t_end=None, n_slices=4,
+                           show_density=True, show_velocity=True,
+                           force_panel=None, dfdrho_panel=False,
+                           frame_interval=0.01, filename="sliced_snapshots.png"):
+    """
+    Static alternative to plot_movie_multiple, for report/presentation use
+    where a full animation is overkill - draws one column of panels per
+    requested simulation time, arranged left-to-right in time, instead of
+    animating. Reuses the same SimData loading and panel conventions as
+    plot_movie_multiple, so the same ddft_configs/md_configs inputs work
+    unchanged.
+
+    timesteps: explicit list of times to show, e.g. [0.5, 1.5, 2.5, 3.5].
+        Takes priority over t_start/t_end/n_slices if given.
+    t_start, t_end, n_slices: if timesteps is None, uses n_slices times
+        evenly spaced (inclusive) between t_start and t_end instead.
+    show_density / show_velocity: toggle those two panels on/off independently
+        (plot_movie_multiple always shows both - this adds the ability to
+        drop either one for a leaner report figure).
+    force_panel / dfdrho_panel: same semantics/values as plot_movie_multiple
+        ("components", "total", or None/False to omit; dfdrho_panel is a
+        separate on/off debug panel).
+    frame_interval: time between consecutive MD frames (project convention:
+        save_interval=0.01) - MD .h5 files have no embedded time field of
+        their own, unlike the DDFT solvers' "{name}{time}.npy" file naming.
+    """
+    ddft_configs = ddft_configs or []
+    md_configs = md_configs or []
+
+    colors = plt.rcParams['axes.prop_cycle'].by_key()['color']
+    color_idx = 0
+    sims = []
+    for path, name in ddft_configs:
+        sims.append(SimData(path, name, colors[color_idx % len(colors)], is_md=False))
+        color_idx += 1
+    for path, name in md_configs:
+        sims.append(SimData(path, name, colors[color_idx % len(colors)], is_md=True))
+        color_idx += 1
+
+    if not sims:
+        print("No simulations provided to plot.")
+        return
+
+    ddfts = [s for s in sims if not s.is_md]
+    mds = [s for s in sims if s.is_md]
+    r, init_rho, V = _get_static_reference(ddfts, mds)
+
+    if timesteps is None:
+        if t_start is None or t_end is None:
+            raise ValueError("plot_sliced_snapshots needs either `timesteps` or both `t_start` and `t_end`.")
+        timesteps = np.linspace(t_start, t_end, n_slices)
+
+    n_cols = len(timesteps)
+    panel_flags = [show_density, show_velocity, bool(force_panel), dfdrho_panel]
+    n_rows = sum(panel_flags)
+    if n_rows == 0:
+        raise ValueError("At least one panel (density/velocity/force/dfdrho) must be enabled.")
+
+    plt.rcParams['text.usetex'] = False
+    plt.rcParams['font.size'] = 12
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=(4 * n_cols, 3.2 * n_rows), sharex='col')
+    axes = np.atleast_2d(axes)
+    if n_cols == 1:
+        axes = axes.reshape(n_rows, 1)
+
+    row_idx = 0
+    row_density = row_idx if show_density else None
+    row_idx += int(show_density)
+    row_velocity = row_idx if show_velocity else None
+    row_idx += int(show_velocity)
+    row_force = row_idx if force_panel else None
+    row_idx += int(bool(force_panel))
+    row_df = row_idx if dfdrho_panel else None
+
+    legend_handles, legend_labels = [], []
+
+    for col, t_req in enumerate(timesteps):
+        ax_rho = axes[row_density, col] if row_density is not None else None
+        ax_v = axes[row_velocity, col] if row_velocity is not None else None
+        ax_force = axes[row_force, col] if row_force is not None else None
+        ax_df = axes[row_df, col] if row_df is not None else None
+
+        if ax_rho is not None:
+            ax_rho.plot(r, init_rho, color='gray', ls='--', alpha=0.5, label='Initial' if col == 0 else None)
+            ax_rho2 = ax_rho.twinx()
+            ax_rho2.plot(r, V, color="#D1D3D4", label='Vext' if col == 0 else None)
+            ax_rho2.tick_params(axis='y', labelcolor="#D1D3D4")
+            if col == n_cols - 1:
+                ax_rho2.set_ylabel('External potential', color="#D1D3D4")
+
+        for sim in sims:
+            if sim.is_md:
+                frame_idx = int(round(t_req / frame_interval))
+                if frame_idx >= sim.frames:
+                    continue
+                actual_t = frame_idx * frame_interval
+                with h5py.File(sim.md_files[frame_idx], 'r') as f:
+                    rho_data = np.array(f['n']).flatten()
+                    v_data = np.array(f['vz']).flatten() if sim.has_v else None
+            else:
+                actual_t, idx = _nearest_ddft_frame(sim, t_req)
+                if idx is None:
+                    continue
+                rho_data = np.load(sim.rho_files[idx]).flatten()
+                v_data = np.load(sim.v_files[idx]).flatten() if sim.has_v and idx < len(sim.v_files) else None
+
+            label = sim.name if col == 0 else None
+            if ax_rho is not None:
+                line, = ax_rho.plot(r, rho_data, color=sim.color, lw=2, label=label)
+                if col == 0:
+                    legend_handles.append(line)
+                    legend_labels.append(sim.name)
+            if ax_v is not None and v_data is not None:
+                ax_v.plot(r, v_data, color=sim.color, lw=2, label=label)
+
+            if not sim.is_md:
+                if ax_force is not None:
+                    comps = FORCE_COMPONENT_NAMES if force_panel == "components" else ()
+                    for comp_name in comps:
+                        files = sim.component_files.get(comp_name, [])
+                        if idx >= len(files):
+                            continue
+                        comp_data = np.load(files[idx]).flatten()
+                        ls = '-' if comp_name == "f_eq" else '--'
+                        ax_force.plot(r, comp_data, color=sim.color, lw=1.3, ls=ls)
+                    if idx < len(sim.df_mod_files):
+                        total_data = np.load(sim.df_mod_files[idx]).flatten()
+                        ls = ':' if force_panel == "components" else '-'
+                        ax_force.plot(r, total_data, color=sim.color, lw=1.8, ls=ls)
+                if ax_df is not None and idx < len(sim.df_files):
+                    df_data = np.load(sim.df_files[idx]).flatten()
+                    ax_df.plot(r, df_data, color=sim.color, lw=1.8)
+
+        axes[0, col].set_title(f"$t={t_req:.2f}$")
+        for row in range(n_rows):
+            axes[row, col].grid(True, linestyle=':', alpha=0.5)
+            axes[row, col].set_xlim(r[0], r[-1])
+
+    if row_density is not None:
+        axes[row_density, 0].set_ylabel('Density')
+    if row_velocity is not None:
+        axes[row_velocity, 0].set_ylabel('Velocity ($v_z$)')
+        for col in range(n_cols):
+            axes[row_velocity, col].axhline(0, color='black', lw=1, ls=':', alpha=0.5)
+    if row_force is not None:
+        axes[row_force, 0].set_ylabel('Internal force')
+        for col in range(n_cols):
+            axes[row_force, col].axhline(0, color='black', lw=1, ls=':', alpha=0.5)
+    if row_df is not None:
+        axes[row_df, 0].set_ylabel('$\\delta F_{exc} / \\delta \\rho$')
+        for col in range(n_cols):
+            axes[row_df, col].axhline(0, color='black', lw=1, ls=':', alpha=0.5)
+    for col in range(n_cols):
+        axes[-1, col].set_xlabel('Position ($z$)')
+
+    fig.legend(legend_handles, legend_labels, loc='upper center', bbox_to_anchor=(0.5, 1.02),
+               ncol=min(len(legend_labels), 5), fontsize=10, frameon=False)
+    fig.tight_layout(rect=[0, 0, 1, 0.95])
+
+    os.makedirs(output_path, exist_ok=True)
+    out_file = os.path.join(output_path, filename)
+    fig.savefig(out_file, dpi=200, bbox_inches='tight')
+    plt.close(fig)
+    print(f"Saved {out_file}")
+
+
 def plot_movie(results_path, md_path, reference_md_path=None, dfdrho_panel=False):
     """
     Backwards-compatible wrapper for single DDFT and 1-2 MD comparisons.
