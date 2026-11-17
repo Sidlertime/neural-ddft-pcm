@@ -1,0 +1,43 @@
+# Input ablation on 3a: + history (rho, v of the previous solver step) and V_ext.
+# Report: Table 5 (seeds 42/43).
+
+run_id: report/inputs/3a_hist_vext
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs:
+  use_grad: false
+  use_rho_prev: true
+  use_v_prev: true
+  use_vext: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+force_alpha: 1.0
+frame_interval: 0.01
+
+weight_decay: 0.0
+loss_weight_v: 1.0
+loss_weight_rho: 12.18
+noise_std: 1.0e-3
+
+curriculum:
+  - {epochs: 10, window_size: 1, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 1, batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 2, batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 10, window_size: 5, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 5, batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 10, window_size: 10, batch_size: 2, lr: 1.0e-4, stride: 10}
+  - {epochs: 10, window_size: 10, batch_size: 2, lr: 1.0e-4, stride: 10}

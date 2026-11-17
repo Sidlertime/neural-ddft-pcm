@@ -1,0 +1,129 @@
+# Experiments behind the results of the report
+# "Neural Density Functional Theory for Underdamped Dynamical Simulations".
+#
+# models:  every trained correction model, by name. `config` is its training
+#          config, `seed` overrides the config's seed. The trained checkpoint is
+#          shipped as models/report/<name>.ckpt (see models/report/README.md).
+# tables:  every table / reported comparison. A row evaluates one model (or
+#          several seeds of it, reported as mean +/- std) on a target potential
+#          and compares it with the PCM-only model ("baseline") under the same
+#          conditions. Optional row keys (defaults in `defaults`):
+#            gamma    friction of the target data and the solver (0.1, 0.05, 0.5)
+#            dt       solver time step of the model run (the baseline keeps `defaults.dt`)
+#            t_range  simulated time
+#            label    row label (default: "<model> -> <target>")
+#
+# Used by scripts/reproduce/{train,evaluate,tables,figures}.py.
+
+defaults:
+  base_model_path: models/c2_dz32.ckpt     # PCM free-energy functional (Ram et al. 2025)
+  gamma: 0.1
+  eta: 0.6944
+  dt: 1.0e-4
+  t_range: 4.0
+
+models:
+  density_weighted/3a:                  {config: configs/report/density_weighted/3a.yaml}
+  density_weighted/3a_seed43:           {config: configs/report/density_weighted/3a.yaml, seed: 43}
+  density_weighted/3a_seed44:           {config: configs/report/density_weighted/3a.yaml, seed: 44}
+  density_weighted/gaussian:            {config: configs/report/density_weighted/gaussian.yaml}
+  density_weighted/gaussian_seed43:     {config: configs/report/density_weighted/gaussian.yaml, seed: 43}
+  density_weighted/3c:                  {config: configs/report/density_weighted/3c.yaml}
+  density_weighted/mg1:                 {config: configs/report/density_weighted/mg1.yaml}
+  density_weighted/mg2:                 {config: configs/report/density_weighted/mg2.yaml}
+  density_weighted/s1:                  {config: configs/report/density_weighted/s1.yaml}
+  loss_weight/3a_velocity_weighted:     {config: configs/report/loss_weight/3a_velocity_weighted.yaml}
+  loss_weight/gaussian_velocity_weighted: {config: configs/report/loss_weight/gaussian_velocity_weighted.yaml}
+  loss_weight/gaussian_wrho18.7:        {config: configs/report/loss_weight/gaussian_wrho18.7.yaml}
+  loss_weight/mg1_velocity_weighted:    {config: configs/report/loss_weight/mg1_velocity_weighted.yaml}
+  loss_weight/mg1_wrho39.4:             {config: configs/report/loss_weight/mg1_wrho39.4.yaml}
+  inputs/3a_min:                        {config: configs/report/inputs/3a_min.yaml}
+  inputs/3a_accel:                      {config: configs/report/inputs/3a_accel.yaml}
+  inputs/3a_hist_vext:                  {config: configs/report/inputs/3a_hist_vext.yaml}
+  inputs/3a_hist_vext_seed43:           {config: configs/report/inputs/3a_hist_vext.yaml, seed: 43}
+  inputs/3a_hist_accel_vext:            {config: configs/report/inputs/3a_hist_accel_vext.yaml}
+  friction/gaussian_gamma0.05:          {config: configs/report/friction/gaussian_gamma0.05.yaml}
+  multi_potential/3a_gaussian:          {config: configs/report/multi_potential/3a_gaussian.yaml}
+  multi_potential/3a_gaussian_mg1_s1:   {config: configs/report/multi_potential/3a_gaussian_mg1_s1.yaml}
+  alternative_outputs/scalar_potential_3a: {config: configs/report/alternative_outputs/scalar_potential_3a.yaml}
+  alternative_outputs/power_functional_3a: {config: configs/report/alternative_outputs/power_functional_3a.yaml}
+
+tables:
+  self:
+    title: "Table 1: self-evaluation with density-weighted loss"
+    rows:
+      - {models: [density_weighted/3a, density_weighted/3a_seed43, density_weighted/3a_seed44], target: 3a, label: 3a}
+      - {models: [density_weighted/gaussian, density_weighted/gaussian_seed43], target: gaussian, label: gaussian}
+      - {model: density_weighted/3c, target: 3c, label: 3c}
+      - {model: density_weighted/mg1, target: mg1, label: mg1}
+      - {model: density_weighted/mg2, target: mg2, label: mg2}
+      - {model: density_weighted/s1, target: s1, label: s1}
+
+  loss_balance:
+    title: "Table 2: effect of the loss weighting (seed 42)"
+    rows:
+      - {model: loss_weight/3a_velocity_weighted, target: 3a, label: "3a, w_rho/w_v = 1/10"}
+      - {model: density_weighted/3a, target: 3a, label: "3a, 12.2/1"}
+      - {model: loss_weight/gaussian_velocity_weighted, target: gaussian, label: "gaussian, 1/10"}
+      - {model: loss_weight/gaussian_wrho18.7, target: gaussian, label: "gaussian, 18.7/1"}
+      - {model: density_weighted/gaussian, target: gaussian, label: "gaussian, 37.4/1"}
+      - {model: loss_weight/mg1_velocity_weighted, target: mg1, label: "mg1, 1/10"}
+      - {model: density_weighted/mg1, target: mg1, label: "mg1, 19.7/1"}
+      - {model: loss_weight/mg1_wrho39.4, target: mg1, label: "mg1, 39.4/1"}
+
+  zero_shot:
+    title: "Table 3: zero-shot transfer to unseen potentials"
+    rows:
+      - {model: density_weighted/mg2, target: 3a}
+      - {model: density_weighted/s1, target: s2}
+      - {model: density_weighted/3c, target: s2}
+      - {model: density_weighted/mg1, target: s2}
+      - {model: density_weighted/mg2, target: s2}
+      - {model: density_weighted/mg2, target: gausin1}
+      - {model: density_weighted/mg2, target: s3}
+      - {model: density_weighted/3a, target: gausin1}
+      - {model: density_weighted/3a, target: s3}
+      - {model: density_weighted/3c, target: 3d}
+      - {model: density_weighted/mg1, target: 3d}
+      - {model: density_weighted/s1, target: 3d}
+      - {model: density_weighted/mg1, target: 3d, dt: 5.0e-5, label: "mg1 -> 3d (dt = 5e-5)"}
+      - {model: density_weighted/3c, target: 3b}
+
+  friction:
+    title: "Table 4: transfer to a different friction"
+    rows:
+      - {model: density_weighted/3a, target: 3a, gamma: 0.05, label: "3a, gamma = 0.05"}
+      - {model: density_weighted/3a, target: 3a, gamma: 0.5, label: "3a, gamma = 0.5"}
+      - {model: density_weighted/gaussian, target: gaussian, gamma: 0.05, label: "gaussian, gamma = 0.05"}
+      - {model: density_weighted/gaussian, target: gaussian, gamma: 0.5, label: "gaussian, gamma = 0.5"}
+      - {model: friction/gaussian_gamma0.05, target: gaussian, gamma: 0.05, label: "gaussian retrained at 0.05"}
+
+  inputs:
+    title: "Table 5: input ablation on 3a"
+    rows:
+      - {model: inputs/3a_min, target: 3a, label: "none"}
+      - {model: inputs/3a_accel, target: 3a, label: "accel"}
+      - {models: [inputs/3a_hist_vext, inputs/3a_hist_vext_seed43], target: 3a, label: "history, V_ext"}
+      - {model: inputs/3a_hist_accel_vext, target: 3a, label: "history, accel, V_ext"}
+      - {models: [density_weighted/3a, density_weighted/3a_seed43, density_weighted/3a_seed44], target: 3a, label: "history, accel, V_ext, gamma, eta"}
+
+  multi_potential:
+    title: "Table 6 and Sec. 6.6: multi-potential training"
+    rows:
+      - {model: multi_potential/3a_gaussian, target: 3a}
+      - {model: multi_potential/3a_gaussian, target: gaussian}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: 3a}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: gaussian}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: mg1}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: s1}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: 3c}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: mg2}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: s2}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: s3}
+      - {model: multi_potential/3a_gaussian_mg1_s1, target: gausin1}
+
+  alternative_outputs:
+    title: "Discussion: alternative output formats (smoke tests, 10 epochs)"
+    rows:
+      - {model: alternative_outputs/scalar_potential_3a, target: 3a, t_range: 1.0, label: "scalar potential"}
+      - {model: alternative_outputs/power_functional_3a, target: 3a, t_range: 1.0, label: "power functional"}
