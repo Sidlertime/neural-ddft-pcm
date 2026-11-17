@@ -29,6 +29,7 @@ from neural_ddft.physics.force_factory import FORCE_MODES
 # ==========================================
 PARAM_SCHEME = {
     "run_id": (str, "train"),
+    "out_dir": (str, None),                     # Exact output folder; default: results/<date>_<run_id>_<model_mode>_NN
     "seed": (int, 42),                          # Controls chunk-start sampling and DataLoader shuffling
     "model_mode": (str, "hybrid"),              # "equilibrium", "hybrid", or "zimmermann"
     # One or more MD directories. Each becomes one "potential" in the mixed
@@ -168,9 +169,12 @@ def main():
     print(f"force_alpha={args['force_alpha']} | frame_interval={args['frame_interval']} | dt={args['dt']} | n_sub={n_sub} substeps/frame")
 
     # Results & Checkpoint directory
-    current_time = datetime.now().strftime("%Y-%m-%d")
-    base_results = f"results/{current_time}_{args['run_id']}_{args['model_mode']}"
-    run_dir = get_next_result_path(base_results)
+    if args.get("out_dir"):
+        run_dir = args["out_dir"]
+    else:
+        current_time = datetime.now().strftime("%Y-%m-%d")
+        base_results = f"results/{current_time}_{args['run_id']}_{args['model_mode']}"
+        run_dir = get_next_result_path(base_results)
     ckpt_dir = os.path.join(run_dir, "checkpoints")
     os.makedirs(ckpt_dir, exist_ok=True)
     save_config(args, run_dir)

@@ -17,6 +17,7 @@ from neural_ddft.physics.phiflow_pde import PhiFlowDDFT
 
 PARAM_SCHEME = {
     "run_id": (str, "phiflow_eval"),
+    "out_dir": (str, None),                     # Exact output folder; default: results/<date>_<run_id>_<model_mode>_NN
     #"md_path": (str, "../data/g1-closed-dz100/avg_5000"),
     "md_path": (str, "../data/lj_data/ref_gaussian_langevin_01/avg_500/"),
     "ref_md_path": (str, None),
@@ -47,9 +48,12 @@ if __name__ == "__main__":
     # 1. Load Config & Setup Paths
     args = load_config(PARAM_SCHEME, description="Modular Neural DDFT")
     
-    current_time = datetime.now().strftime("%Y-%m-%d")
-    base_path = f"results/{current_time}_{args['run_id']}_{args['model_mode']}"
-    results_path = get_next_result_path(base_path)
+    if args.get("out_dir"):
+        results_path = args["out_dir"]
+    else:
+        current_time = datetime.now().strftime("%Y-%m-%d")
+        base_path = f"results/{current_time}_{args['run_id']}_{args['model_mode']}"
+        results_path = get_next_result_path(base_path)
     os.makedirs(results_path, exist_ok=True)
     save_config(args, results_path) # Permanently record these settings
     

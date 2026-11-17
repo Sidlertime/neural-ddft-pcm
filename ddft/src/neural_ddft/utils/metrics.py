@@ -178,3 +178,58 @@ def summarize_run(pred_dir, ref_dir_or_md=None, is_ref_md=False, max_steps=None)
         return None
     rep = evaluate_single_prediction(pred_dir, ref_dir_or_md, is_ref_md=is_ref_md, max_steps=max_steps)
     return {"density_metrics": rep["density_metrics"], "velocity_metrics": rep.get("velocity_metrics")}
+
+
+# ---------------------------------------------------------------------------
+# Trajectory RMSE and relative change vs. a baseline (report metrics)
+# ---------------------------------------------------------------------------
+
+def per_frame_rmse(pred_dir, md_dir, max_steps=None):
+    """Per saved frame RMSE of density and velocity vs. MD: (times, rmse_rho, rmse_v)."""
+    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps)
+    rmse_rho = np.sqrt([m["mse"] for m in rep["per_step_rho"]])
+    rmse_v = np.sqrt([m["mse"] for m in rep["per_step_v"]]) if "per_step_v" in rep else None
+    return rep["times"], rmse_rho, rmse_v
+
+
+def trajectory_rmse(pred_dir, md_dir, max_steps=None):
+    """
+    Trajectory RMSE vs. MD: root of the mean squared error over all saved frames
+    and grid points, for density and velocity.
+    """
+    rep = evaluate_single_prediction(pred_dir, md_dir, is_ref_md=True, max_steps=max_steps)
+    v = rep.get("velocity_metrics")
+    return {
+        "rho": float(np.sqrt(rep["density_metrics"]["overall_mse"])),
+        "v": float(np.sqrt(v["overall_mse"])) if v else None,
+        "n_frames": int(rep["n_frames_evaluated"]),
+        "t_end": float(rep["times"][-1]),
+    }
+
+
+def n_saved_frames(pred_dir):
+    """Number of saved density frames of a prediction folder (fewer than expected if it diverged)."""
+    return len(load_npy_series(pred_dir, prefix="rho"))
+
+
+def relative_change(model_dir, baseline_dir, md_dir):
+    """
+    Relative change of the trajectory RMSE of a model vs. a baseline (e.g. the
+    PCM-only model) on the same MD data, Delta = (RMSE_model - RMSE_base) / RMSE_base.
+    Negative values are improvements.
+
+    If either run stopped early (blow-up), both are compared over the same,
+    shortened time window; `time_matched` and `t_end` report this.
+    """
+    n = min(n_saved_frames(model_dir), n_saved_frames(baseline_dir))
+    model = trajectory_rmse(model_dir, md_dir, max_steps=n)
+    base = trajectory_rmse(baseline_dir, md_dir, max_steps=n)
+    full = trajectory_rmse(baseline_dir, md_dir)["n_frames"]
+    return {
+        "d_rho": (model["rho"] - base["rho"]) / base["rho"],
+        "d_v": (model["v"] - base["v"]) / base["v"] if model["v"] is not None and base["v"] else None,
+        "rmse_model": model,
+        "rmse_baseline": base,
+        "time_matched": n < full,
+        "t_end": model["t_end"],
+    }
