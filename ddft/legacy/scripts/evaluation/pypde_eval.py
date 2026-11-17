@@ -12,6 +12,7 @@ from scipy.ndimage import gaussian_filter1d
 import numba as nb
 
 from neural_ddft.models.neural_free_energy import NeuralFreeEnergyFine, NeuralFreeEnergy
+from neural_ddft.models.model import SuperadiabaticNet
 from neural_ddft.utils.functions import plot_movie
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
 
@@ -21,7 +22,7 @@ from neural_ddft.utils.config import load_config, get_next_result_path, save_con
 
 PARAM_SCHEME = {
     "run_id": (str, "pypde_eval"),
-    "md_path": (str, "../data/g1-closed-dz100/avg_5000"),
+    "md_path": (str, "../data/lj_data/ref_3a_langevin_01/avg_2000/"),
     "ref_md_path": (str, None),
     "type": (str, "c2"),
     #"base_model": (str, None),
@@ -31,6 +32,18 @@ PARAM_SCHEME = {
     "gamma": (float, 2.0),
     "eta": (float, 0.01),
     "dt": (float, 1e-4),
+    # Optional learned superadiabatic correction (hybrid mode) - checkpoint
+    # path plus the architecture flags it was trained with (must match
+    # exactly, same requirement as neural-ddft-pcm's own checkpoint-
+    # consistency check in factory.py).
+    "sup_model_path": (str, None),
+    "sup_use_grad": (bool, True),
+    "sup_use_vext": (bool, False),
+    "sup_use_rho_prev": (bool, False),
+    "sup_use_v_prev": (bool, False),
+    "sup_use_accel": (bool, False),
+    "sup_use_gamma": (bool, False),
+    "sup_use_eta": (bool, False),
 }
 
 args = load_config(PARAM_SCHEME, description="Modular Neural DDFT in PyPDE")
@@ -65,6 +78,19 @@ else:
     
 model.eval()
 
+sup_model = None
+if args.get('sup_model_path'):
+    sup_model = SuperadiabaticNet(
+        channels=16, use_grad=args['sup_use_grad'], use_vext=args['sup_use_vext'],
+        use_rho_prev=args['sup_use_rho_prev'], use_v_prev=args['sup_use_v_prev'],
+        use_accel=args['sup_use_accel'], use_gamma=args['sup_use_gamma'], use_eta=args['sup_use_eta'],
+    )
+    sup_ckpt = torch.load(args['sup_model_path'], map_location=torch.device('cpu'))
+    sup_state_dict = sup_ckpt['state_dict'] if isinstance(sup_ckpt, dict) and 'state_dict' in sup_ckpt else sup_ckpt
+    sup_model.load_state_dict(sup_state_dict)
+    sup_model.eval()
+    print(f"Loaded hybrid correction network from {args['sup_model_path']}")
+
 ################
 ##### DDFT #####
 ################
@@ -82,6 +108,55 @@ def dft_U(rho, smoothing=True):
     if smoothing:
         dFdrho = gaussian_filter1d(dFdrho, sigma=2.0)
     return dFdrho
+
+
+# Simple same-object cache for rho_prev/v_prev - py-pde's string-expression
+# PDE system calls sup_f as a stateless function at arbitrary (possibly
+# out-of-order, due to adaptive substepping) t, so "previous step" has no
+# precise meaning here; same None->self fallback convention as
+# force_factory.py's own rho_prev_grid=None case.
+_prev_cache = {"rho": None, "v": None}
+
+
+def sup_f(rho, v):
+    """Optional learned superadiabatic correction force, same channel-
+    building convention as neural-ddft-pcm's force_factory.py:get_hybrid_force."""
+    if sup_model is None:
+        return np.zeros_like(rho)
+
+    rho_t = torch.from_numpy(rho).view(1, -1).float()
+    v_t = torch.from_numpy(v).view(1, -1).float()
+    grad_rho_t = (torch.roll(rho_t, -1, dims=-1) - torch.roll(rho_t, 1, dims=-1)) / (2 * dz)
+    grad_v_t = (torch.roll(v_t, -1, dims=-1) - torch.roll(v_t, 1, dims=-1)) / (2 * dz)
+
+    extra_kwargs = {}
+    if sup_model.use_vext:
+        extra_kwargs["v_ext"] = torch.from_numpy(V).view(1, -1).float()
+    needs_rho_prev = sup_model.use_rho_prev
+    needs_v_prev = sup_model.use_v_prev
+    needs_accel = sup_model.use_accel
+    if needs_rho_prev or needs_accel:
+        prev = _prev_cache["rho"] if _prev_cache["rho"] is not None else rho
+        rho_prev_t = torch.from_numpy(prev).view(1, -1).float()
+        if needs_rho_prev:
+            extra_kwargs["rho_prev"] = rho_prev_t
+    if needs_v_prev or needs_accel:
+        prev = _prev_cache["v"] if _prev_cache["v"] is not None else v
+        v_prev_t = torch.from_numpy(prev).view(1, -1).float()
+        if needs_v_prev:
+            extra_kwargs["v_prev"] = v_prev_t
+    if needs_accel:
+        extra_kwargs["accel"] = (v_t - v_prev_t) / args['dt']
+    if sup_model.use_gamma:
+        extra_kwargs["gamma"] = torch.full_like(rho_t, float(args['gamma']))
+    if sup_model.use_eta:
+        extra_kwargs["eta"] = torch.full_like(rho_t, float(args['eta']))
+
+    with torch.no_grad():
+        f_sup = sup_model(rho_t, v_t, grad_rho_t, grad_v_t, **extra_kwargs).squeeze(0).numpy()
+
+    _prev_cache["rho"], _prev_cache["v"] = rho.copy(), v.copy()
+    return f_sup
 
 # rho must not be exactly zero to avoid division errors in the pressure/viscosity terms
 init_rho_safe = np.maximum(init_rho, 1e-6)
@@ -165,13 +240,18 @@ term_force = ("- (1/m) * ("
 #term_viscosity = "+ (eta / (m * rho)) * vector_laplace(v)"
 term_viscosity = "+ (eta / (m * rho)) * laplace(v)"
 
+# Optional learned superadiabatic correction (hybrid mode, see sup_f above) -
+# zero when no sup_model_path was given, so this is a no-op extension of
+# the original equation in that case.
+term_sup = "+ (1/m) * sup_f(rho, v)"
+
 # Combine
-eq_v = f"{term_advection} {term_friction} {term_force} {term_viscosity}"
+eq_v = f"{term_advection} {term_friction} {term_force} {term_viscosity} {term_sup}"
 
 # Combine into PDE system
 eq = pde.PDE(
     {"rho": eq_rho, "v": eq_v},
-    user_funcs={"dft_u": dft_U, "safe_log": safe_log, "upwind_adv": upwind_adv},
+    user_funcs={"dft_u": dft_U, "safe_log": safe_log, "upwind_adv": upwind_adv, "sup_f": sup_f},
     consts={"V_ext_field": V_ext_field, "T": T, "k": k, "gamma": gamma, "m": m, "eta": eta},
     bc=[{"type": "periodic"}, {"type": "periodic"}] # BCs for rho and v
 )
