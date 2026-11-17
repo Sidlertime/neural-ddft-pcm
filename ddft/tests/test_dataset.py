@@ -86,6 +86,46 @@ def test_phase_chunk_indices_start_fraction_is_fixed_and_deterministic():
     print("[DEBUG] test_phase_chunk_indices_start_fraction_is_fixed_and_deterministic passed successfully.")
 
 
+@requires_md_data
+def test_phase_chunk_indices_start_min_fraction_bounds_random_draw():
+    print("\n[DEBUG] Starting test_phase_chunk_indices_start_min_fraction_bounds_random_draw...")
+    window_size = 5
+    combined = MultiPotentialMDDataset(
+        [GAUSSIAN_PATH, REF_3A_PATH], window_size=window_size, stride=1
+    )
+
+    # With start_min_fraction=0.5, every potential's chunk must start at or
+    # past 50% of its own trajectory length, across many random draws.
+    offset_lengths = []
+    offset = 0
+    for length in combined._lengths:
+        offset_lengths.append((offset, length))
+        offset += length
+
+    for seed in range(20):
+        indices = combined.phase_chunk_indices(
+            chunk_fraction=0.15, start_min_fraction=0.5, rng=np.random.RandomState(seed)
+        )
+        for offset, length in offset_lengths:
+            chunk_here = sorted(i - offset for i in indices if offset <= i < offset + length)
+            chunk_size = max(1, int(0.15 * length))
+            min_start = min(int(0.5 * length), max(0, length - chunk_size))
+            assert chunk_here[0] >= min_start, "chunk start fell before start_min_fraction"
+
+    # Default (start_min_fraction=0.0) must still be able to draw a start near 0
+    # (sanity check that the new parameter didn't change the old default behavior).
+    saw_near_zero_start = False
+    for seed in range(50):
+        indices = combined.phase_chunk_indices(chunk_fraction=0.15, rng=np.random.RandomState(seed))
+        offset, length = offset_lengths[0]
+        chunk_here = sorted(i - offset for i in indices if offset <= i < offset + length)
+        if chunk_here[0] < int(0.05 * length):
+            saw_near_zero_start = True
+            break
+    assert saw_near_zero_start
+    print("[DEBUG] test_phase_chunk_indices_start_min_fraction_bounds_random_draw passed successfully.")
+
+
 def test_assert_consistent_grid_rejects_mismatched_potentials():
     print("\n[DEBUG] Starting test_assert_consistent_grid_rejects_mismatched_potentials...")
     ref = SimpleNamespace(domain_resolution=320, box_length=9.96875, dr=0.03115)

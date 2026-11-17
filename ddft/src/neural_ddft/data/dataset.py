@@ -162,7 +162,7 @@ class MultiPotentialMDDataset(Dataset):
         item['potential_id'] = pot_idx
         return item
 
-    def phase_chunk_indices(self, chunk_fraction, start_fraction=None, rng=None):
+    def phase_chunk_indices(self, chunk_fraction, start_fraction=None, start_min_fraction=0.0, rng=None):
         """
         Picks one continuous chunk per potential (scoped to that potential's
         own trajectory) and returns their combined global indices into this
@@ -180,6 +180,12 @@ class MultiPotentialMDDataset(Dataset):
         potential "grad_quarter" run, which held one fixed chunk - starting
         at 40% of the trajectory - for its entire training run instead of
         resampling, unlike the random-every-phase default above).
+
+        start_min_fraction=<float in [0, 1]>: only applies when start_fraction
+        is None. Restricts the random draw to [start_min_fraction, 1.0) of the
+        trajectory, so trivially-easy early frames (where the equilibrium
+        baseline already matches MD almost exactly) are never sampled as a
+        chunk start.
         """
         rng = rng if rng is not None else np.random
         indices = []
@@ -187,7 +193,8 @@ class MultiPotentialMDDataset(Dataset):
             chunk_size = max(1, int(chunk_fraction * length))
             max_start = max(0, length - chunk_size)
             if start_fraction is None:
-                start = int(rng.randint(0, max_start + 1))
+                min_start = min(int(start_min_fraction * length), max_start)
+                start = int(rng.randint(min_start, max_start + 1))
             else:
                 start = min(int(start_fraction * length), max_start)
             indices.extend(int(self._offsets[pot_idx]) + np.arange(start, start + chunk_size))

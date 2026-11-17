@@ -63,6 +63,7 @@ PARAM_SCHEME = {
     "loss_spike_multiplier": (float, 1000.0),   # Skip a batch if its loss exceeds this multiple of the running EMA of accepted losses (catches finite-but-anomalous blowups the isfinite() guard misses). Must comfortably exceed the legitimate loss-scale jump a curriculum phase transition can cause (observed ~100x at a window_size=15->35 jump) while staying far below genuine corruption events (observed ~1e24x); 0 or None disables
     "chunk_fraction": (float, 0.15),             # Size of each phase's per-potential training chunk, as a fraction of that phase's dataset length
     "chunk_start_fraction": (float, None),       # If set, every phase's chunk starts at this same fixed fraction of the trajectory (no resampling) - mirrors the one proven-successful single-potential run, which held one fixed chunk for its entire training. If None (default), a fresh random chunk is drawn each phase ("Continuous Multi-Start Shifting Chunks").
+    "chunk_start_min_fraction": (float, 0.0),    # Only used when chunk_start_fraction is None (random per-phase sampling). Restricts the random start to [chunk_start_min_fraction, 1.0) of the trajectory, so early frames (where the equilibrium baseline already fits near-perfectly, see e.g. 3a/gaussian error-vs-time: MSE ~0 for the first ~5-10%) are skipped in favor of the harder region where the correction actually matters. Default 0.0 preserves the original full-range sampling exactly.
     "curriculum": (list, [
         # one step prediction
         {"epochs": 10,  "window_size": 2,  "batch_size": 8, "lr": 1e-3, "stride": 1},
@@ -278,7 +279,8 @@ def main():
         # chunk_start_fraction is set, every phase uses the same fixed region
         # (no resampling); otherwise a fresh random chunk is drawn each phase.
         phase_indices = full_dataset.phase_chunk_indices(
-            chunk_fraction=args["chunk_fraction"], start_fraction=args.get("chunk_start_fraction")
+            chunk_fraction=args["chunk_fraction"], start_fraction=args.get("chunk_start_fraction"),
+            start_min_fraction=args.get("chunk_start_min_fraction", 0.0)
         )
         phase_subset = Subset(full_dataset, phase_indices)
 

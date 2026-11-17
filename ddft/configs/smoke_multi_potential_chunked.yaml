@@ -1,0 +1,58 @@
+# Smoke test: first-ever multi-potential training under the FIXED train_phiflow.py
+# (force_alpha=1.0, frame_interval=0.01 -> n_sub=100), using chunked (not
+# full-trajectory) sampling to see if chunk variety speeds up / helps
+# generalization. 3a + gaussian: both production-gamma, both already have a
+# known-good density-weighted single-potential result to compare against
+# (3a: rho=12.18 -12.6%/-37.3%; gaussian: rho=37.4 -5.6%/-58.6%). loss_weight_rho=20 here is a single compromise
+# value between those two per-potential optima, NOT independently re-derived -
+# this is a quick first look, not a tuned run.
+#
+# chunk_start_min_fraction=0.15: per direct inspection of both potentials'
+# equilibrium-baseline error-vs-time (evaluate_single_prediction), density MSE
+# is ~0 for the first 5-10% of either trajectory (equilibrium already matches
+# MD almost exactly there) and only starts growing meaningfully past ~10-15% -
+# so random chunk starts are restricted to skip that trivially-easy region.
+# chunk_start_fraction left at null (default) to keep resampling a fresh
+# chunk every curriculum phase ("Continuous Multi-Start Shifting Chunks").
+run_id: smoke_multi/3a_gaussian_chunked
+seed: 42
+model_mode: hybrid
+
+md_paths:
+  - ../data/lj_data/ref_3a_langevin_01/avg_2000/
+  - ../data/lj_data/ref_gaussian_langevin_01/avg_500/
+
+base_model_path: models/c2_dz32.ckpt
+sup_model_path: null
+zimmermann_model_path: null
+
+model_kwargs:
+  use_vext: true
+  use_rho_prev: true
+  use_v_prev: true
+  use_accel: true
+  use_gamma: true
+  use_eta: true
+
+k: 1.0
+T: 2.0
+m: 1.0
+gamma: 0.1
+eta: 0.6944
+dt: 1.0e-4
+force_alpha: 1.0
+frame_interval: 0.01
+
+weight_decay: 0.0
+loss_weight_v: 1.0
+loss_weight_rho: 20.0
+noise_std: 1.0e-3
+
+chunk_fraction: 0.15
+chunk_start_min_fraction: 0.15
+
+curriculum:
+  - {epochs: 8, window_size: 1,  batch_size: 8, lr: 1.0e-3, stride: 1}
+  - {epochs: 8, window_size: 2,  batch_size: 8, lr: 5.0e-4, stride: 2}
+  - {epochs: 8, window_size: 5,  batch_size: 4, lr: 2.0e-4, stride: 6}
+  - {epochs: 8, window_size: 10, batch_size: 2, lr: 1.0e-4, stride: 10}
