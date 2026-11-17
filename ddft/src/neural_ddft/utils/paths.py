@@ -13,7 +13,8 @@ with an environment variable of the same name:
 
 MD data layout (written by mdext-ddft, see its README):
 
-    DATA_ROOT/ref_<potential>[_gamma<tag>]_langevin_01/avg_<trials>/collection.NNN.h5
+    DATA_ROOT/ref_<potential>[_gamma<digits>]_langevin_01/avg_<trials>/collection.NNN.h5
+    (e.g. ref_3a_langevin_01 for gamma = 0.1, ref_3a_gamma005_langevin_01 for gamma = 0.05)
 """
 import glob
 import os
@@ -29,7 +30,13 @@ MDEXT_ROOT = os.environ.get("MDEXT_ROOT", os.path.join(os.path.dirname(REPO_ROOT
 
 # Friction of the reference data. gamma = 1/Tdamp of the Langevin thermostat.
 DEFAULT_GAMMA = 0.1
-_GAMMA_TAGS = {0.1: "", 0.05: "_gamma005", 0.5: "_gamma05"}
+
+
+def gamma_tag(gamma):
+    """Folder tag of a friction value: 0.1 -> "" (default), 0.05 -> "_gamma005", 0.5 -> "_gamma05"."""
+    if abs(gamma - DEFAULT_GAMMA) < 1e-12:
+        return ""
+    return "_gamma" + f"{gamma:g}".replace(".", "")
 
 
 def md_dir(potential, gamma=DEFAULT_GAMMA, data_root=None):
@@ -39,9 +46,7 @@ def md_dir(potential, gamma=DEFAULT_GAMMA, data_root=None):
 
     Raises FileNotFoundError with a hint how to create the data if it is missing.
     """
-    if gamma not in _GAMMA_TAGS:
-        raise ValueError(f"no reference data for gamma={gamma}; available: {sorted(_GAMMA_TAGS)}")
-    base = os.path.join(data_root or DATA_ROOT, f"ref_{potential}{_GAMMA_TAGS[gamma]}_langevin_01")
+    base = os.path.join(data_root or DATA_ROOT, f"ref_{potential}{gamma_tag(gamma)}_langevin_01")
     candidates = sorted(glob.glob(os.path.join(base, "avg_*")))
     if not candidates:
         raise FileNotFoundError(
