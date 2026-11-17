@@ -2,6 +2,7 @@ import os
 import glob
 import json
 import csv
+import builtins
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -11,6 +12,10 @@ from datetime import datetime
 from tqdm import tqdm
 from torch.utils.data import DataLoader, Subset, SubsetRandomSampler
 from phi.torch.flow import *
+# from phi.torch.flow import * shadows Python's builtin round() with PhiFlow's
+# own (single-argument, float-returning) round_ - use builtins.round below
+# wherever an actual int is needed (e.g. range() bounds), same fix as
+# continuity_diagnostic.py / force_factory.py elsewhere in this project.
 
 # Package imports
 from neural_ddft.utils.config import load_config, get_next_result_path, save_config
@@ -47,6 +52,8 @@ PARAM_SCHEME = {
     "dt": (float, 1e-4),
     "rho_floor": (float, 1e-6),                 # Density clamp floor - viscosity/pressure terms scale as 1/rho, so this controls how extreme they can get as density erodes
     "diffusion_coeff": (float, 0.5),             # Artificial-diffusion stabilization coefficient (D_art = diffusion_coeff*dx*|v|) in the continuity step - pure numerics, not physical; default preserves original hardcoded behavior exactly
+    "force_alpha": (float, 1.0),                # Multiplier on (f_eq + f_sup) in the momentum update. Must match eval's PhiFlowDDFT.step default (alpha=1) - a stray alpha=5 here was a training-only bug for every run before 2026-11-16.
+    "frame_interval": (float, 0.01),            # Wall-clock spacing between consecutive MD-saved frames (matches mdext_ddft/examples/lj/lj.py's steps_per_thermo=10 * dt=0.001). n_sub = frame_interval/dt substeps are run per target frame so training's rollout covers the same physical time as one MD frame-to-frame gap, matching eval's substepping exactly.
 
     # Training parameters
     "weight_decay": (float, 1e-4),              # L2 regularization for smooth spatial derivatives
@@ -82,7 +89,7 @@ PARAM_SCHEME = {
 # PhiFlow Differentiable PDE Step
 # ==========================================
 def pde_step(rho, v, dt, V_ext, compute_internal_force, models, dx, device, config,
-             rho_prev=None, v_prev=None, alpha=5.0):
+             rho_prev=None, v_prev=None, alpha=1.0):
     """
     Performs one explicit integration step with computational graph intact.
     rho_prev/v_prev: the state from one step earlier within this window's
@@ -146,6 +153,18 @@ def main():
     np.random.seed(args["seed"])
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using compute device: {device}")
+
+    # n_sub substeps of args["dt"] per target MD frame, so the training rollout
+    # covers the same physical time (frame_interval) as the gap between two
+    # consecutive saved MD frames - matching eval's substepping. Training previously took exactly
+    # ONE pde_step per frame regardless of dt, which at dt=1e-4/frame_interval=0.01
+    # covered only 1% of the real time-to-target (practically a no-op step).
+    n_sub = builtins.round(args["frame_interval"] / args["dt"])
+    assert abs(n_sub * args["dt"] - args["frame_interval"]) < 1e-9, (
+        f"frame_interval ({args['frame_interval']}) must be an exact multiple of dt ({args['dt']}); "
+        f"got n_sub={n_sub}, n_sub*dt={n_sub * args['dt']}"
+    )
+    print(f"force_alpha={args['force_alpha']} | frame_interval={args['frame_interval']} | dt={args['dt']} | n_sub={n_sub} substeps/frame")
 
     # Results & Checkpoint directory
     current_time = datetime.now().strftime("%Y-%m-%d")
@@ -216,8 +235,7 @@ def main():
     # catches finite-but-anomalous blowups (e.g. loss reaching 1e22, still well
     # under float32's isfinite ceiling) that the plain torch.isfinite() check
     # cannot see. Only updated on accepted batches so a spike never pollutes
-    # its own baseline. See feedback_warmstart_nan_gap.md for the incident that
-    # motivated this - a checkpoint whose loss curve "recovered" after a spike
+    # its own baseline. Motivated by a real incident: a checkpoint whose loss curve "recovered" after a spike
     # was still silently corrupted, with no finite-value trace of the damage.
     loss_ema = None
     loss_ema_decay = 0.98
@@ -328,23 +346,76 @@ def main():
                     # None for the first step - no history available yet within this window.
                     rho_prev_track, v_prev_track = None, None
 
-                    # Unroll trajectory through the PDE
+                    # Unroll trajectory through the PDE. Each outer iteration is one
+                    # target MD frame; the inner loop runs n_sub substeps of args["dt"]
+                    # to cover frame_interval of real time before comparing against
+                    # that frame - matching eval's substepping exactly (previously this
+                    # ran exactly ONE pde_step per frame regardless of dt;
+                    # covered by tests/test_training_substep_alignment.py).
                     for step_idx in range(1, window_size + 1):
-                        rho_next, v_next, force_components = pde_step(
-                            rho_current, v_current, args["dt"], V_ext_grid,
-                            compute_internal_force, models, dx, device, args,
-                            rho_prev=rho_prev_track, v_prev=v_prev_track,
-                        )
+                        frame_force_ratio_sum = torch.tensor(0.0, device=device)
+                        frame_force_penalty_sum = torch.tensor(0.0, device=device)
+                        frame_ratio_per_sample_sum = None
 
-                        pred_rho = rho_next.values.native('batch,x')
-                        pred_v = v_next.values.vector['x'].native('batch,x')
+                        for sub_idx in range(n_sub):
+                            rho_next, v_next, force_components = pde_step(
+                                rho_current, v_current, args["dt"], V_ext_grid,
+                                compute_internal_force, models, dx, device, args,
+                                rho_prev=rho_prev_track, v_prev=v_prev_track,
+                                alpha=args["force_alpha"],
+                            )
 
-                        # Bail out of the rollout immediately on a non-finite prediction,
-                        # before it can poison the per-potential CSV accumulators below
-                        # (not just the backward pass) - see note at batch_is_nan handling.
-                        if not (torch.isfinite(pred_rho).all() and torch.isfinite(pred_v).all()):
-                            batch_is_nan = True
+                            pred_rho_sub = rho_next.values.native('batch,x')
+                            pred_v_sub = v_next.values.vector['x'].native('batch,x')
+
+                            # Bail out of the rollout immediately on a non-finite prediction,
+                            # before it can poison the per-potential CSV accumulators below
+                            # (not just the backward pass) - see note at batch_is_nan handling.
+                            if not (torch.isfinite(pred_rho_sub).all() and torch.isfinite(pred_v_sub).all()):
+                                batch_is_nan = True
+                                break
+
+                            # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode.
+                            # Reuses the f_eq/f_sup already computed inside pde_step's internal
+                            # compute_internal_force call - no second base/sup model forward pass.
+                            # hybrid_power's correction component is keyed "f_power" and zimmermann's
+                            # is keyed "f_zimmermann" rather than "f_sup" (see
+                            # force_factory.py:get_hybrid_power_force/get_zimmermann_force) - same
+                            # quantity, different force function, different dict key. Accumulated
+                            # per substep then averaged over n_sub below, so the force penalty
+                            # doesn't get n_sub times stronger than before the fix.
+                            if mode in ("hybrid", "hybrid_power", "zimmermann"):
+                                f_eq_grid = force_components["f_eq"]
+                                f_sup_key = {"hybrid": "f_sup", "hybrid_power": "f_power", "zimmermann": "f_zimmermann"}[mode]
+                                f_sup_grid = force_components[f_sup_key]
+                                f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
+                                f_sup_tensor = f_sup_grid.values.vector['x'].native(f_sup_grid.values.vector['x'].shape)
+
+                                norm_eq = torch.norm(f_eq_tensor) + 1e-8
+                                norm_sup = torch.norm(f_sup_tensor)
+                                frame_force_ratio_sum = frame_force_ratio_sum + (norm_sup / norm_eq).detach()
+
+                                with torch.no_grad():
+                                    ratio_per_sample = torch.norm(f_sup_tensor, dim=-1) / (torch.norm(f_eq_tensor, dim=-1) + 1e-8)
+                                    frame_ratio_per_sample_sum = (
+                                        ratio_per_sample if frame_ratio_per_sample_sum is None
+                                        else frame_ratio_per_sample_sum + ratio_per_sample
+                                    )
+
+                                frame_force_penalty_sum = frame_force_penalty_sum + torch.mean(f_sup_tensor ** 2)
+
+                            # History channels (use_rho_prev/use_v_prev/use_accel) must see the
+                            # same dt-spaced previous state as eval, not the state one whole
+                            # frame back - so this updates every substep, not once per frame.
+                            rho_prev_track, v_prev_track = rho_current, v_current
+                            rho_current = rho_next
+                            v_current = v_next
+
+                        if batch_is_nan:
                             break
+
+                        pred_rho = rho_current.values.native('batch,x')
+                        pred_v = v_current.values.vector['x'].native('batch,x')
 
                         target_rho = rho_batch[:, step_idx, :]
                         target_v = v_batch[:, step_idx, :]
@@ -365,34 +436,14 @@ def main():
                             scatter_add_by_potential(loss_rho_per_sample, potential_ids, epoch_loss_rho_per_pot)
                             scatter_add_by_potential(loss_v_per_sample, potential_ids, epoch_loss_v_per_pot)
 
-                        # Compute relative force magnitude ratio (||f_sup|| / ||f_eq||) if hybrid mode.
-                        # Reuses the f_eq/f_sup already computed inside pde_step's internal
-                        # compute_internal_force call - no second base/sup model forward pass.
-                        # hybrid_power's correction component is keyed "f_power" rather than
-                        # "f_sup" (see force_factory.py:get_hybrid_power_force) - same quantity,
-                        # different force function, different dict key.
-                        if mode in ("hybrid", "hybrid_power"):
-                            f_eq_grid = force_components["f_eq"]
-                            f_sup_grid = force_components["f_sup" if mode == "hybrid" else "f_power"]
-                            f_eq_tensor = f_eq_grid.values.vector['x'].native(f_eq_grid.values.vector['x'].shape)
-                            f_sup_tensor = f_sup_grid.values.vector['x'].native(f_sup_grid.values.vector['x'].shape)
-
-                            norm_eq = torch.norm(f_eq_tensor) + 1e-8
-                            norm_sup = torch.norm(f_sup_tensor)
-                            ratio_step = (norm_sup / norm_eq).detach()
-                            batch_force_ratio = batch_force_ratio + ratio_step
+                        if mode in ("hybrid", "hybrid_power", "zimmermann"):
+                            batch_force_ratio = batch_force_ratio + (frame_force_ratio_sum / n_sub)
 
                             with torch.no_grad():
-                                ratio_per_sample = torch.norm(f_sup_tensor, dim=-1) / (torch.norm(f_eq_tensor, dim=-1) + 1e-8)
-                                scatter_add_by_potential(ratio_per_sample, potential_ids, epoch_force_ratio_per_pot)
+                                scatter_add_by_potential(frame_ratio_per_sample_sum / n_sub, potential_ids, epoch_force_ratio_per_pot)
 
                             # add regularization to network not overdominate force term (only tiny corrections)
-                            force_penalty = torch.mean(f_sup_tensor ** 2)
-                            loss = loss + (1e-4 * force_penalty)
-
-                        rho_prev_track, v_prev_track = rho_current, v_current
-                        rho_current = rho_next
-                        v_current = v_next
+                            loss = loss + (1e-4 * (frame_force_penalty_sum / n_sub))
 
                     # Skip NaN/Inf batches instead of letting them corrupt the model
                     # weights permanently via backward()/optimizer.step() - a single
@@ -403,7 +454,7 @@ def main():
 
                     # Loss-spike guard: a loss that is technically finite but wildly
                     # anomalous relative to recent training (e.g. 1e22, confirmed to
-                    # occur in practice - see feedback_warmstart_nan_gap.md) sails
+                    # occur in practice) sails
                     # through the isfinite() check above. Gradient clipping below
                     # then bounds the resulting weight-update MAGNITUDE, so the
                     # corruption leaves no trace in weight norms - it has to be
@@ -429,7 +480,7 @@ def main():
                     # Defense-in-depth for the original (non-spike) failure mode: a
                     # rollout that stayed finite but produced non-finite gradients
                     # directly (e.g. a warm-started continuation onto a fragile
-                    # potential, see feedback_warmstart_nan_gap.md's first incident).
+                    # potential).
                     grad_is_finite = all(
                         torch.isfinite(p.grad).all() for p in trainable_params if p.grad is not None
                     )
@@ -451,7 +502,7 @@ def main():
                     epoch_loss += accepted_loss_item
                     epoch_loss_rho += batch_loss_rho.detach().item()
                     epoch_loss_v += batch_loss_v.detach().item()
-                    epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode in ("hybrid", "hybrid_power") else 0.0
+                    epoch_force_ratio += (batch_force_ratio.detach().item() / window_size) if mode in ("hybrid", "hybrid_power", "zimmermann") else 0.0
                     num_batches += 1
 
                     pbar.set_postfix(
@@ -472,7 +523,7 @@ def main():
             avg_v_per_pot = epoch_loss_v_per_pot / per_pot_denom
             avg_ratio_per_pot = epoch_force_ratio_per_pot / per_pot_denom
 
-            ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode in ("hybrid", "hybrid_power") else ""
+            ratio_str = " | ".join(f"{name}={avg_ratio_per_pot[i]:.4f}" for i, name in enumerate(potential_names)) if mode in ("hybrid", "hybrid_power", "zimmermann") else ""
             skipped_str = (
                 f" | Skipped={epoch_skipped_batches}"
                 f" (nan={epoch_skipped_rollout_nan}, spike={epoch_skipped_loss_spike}, grad={epoch_skipped_grad_nonfinite})"
