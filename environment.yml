@@ -1,0 +1,26 @@
+# Environment for neural-ddft-pcm (and goddard-ddft).
+# Linux, macOS and Windows. CPU build of PyTorch; for a CUDA GPU see README.
+# LAMMPS (MD data generation) is not included: use the environment of mdext-ddft.
+name: neural-ddft
+channels:
+  - conda-forge
+dependencies:
+  - python=3.12
+  - numpy>=2.0
+  - scipy
+  - matplotlib
+  - h5py
+  - pyyaml
+  - pandas
+  - tqdm
+  - pytorch-cpu>=2.4
+  - pytorch-lightning      # loading the PCM free-energy checkpoints
+  - py-pde=0.47            # legacy overdamped DDFT solver (ddft/legacy)
+  - numba
+  - ffmpeg                 # saving .mp4 movies
+  - pytest
+  - pip
+  - pip:
+      - phiflow==3.4.0
+      - phiml==1.15.1          # phiml 1.16 breaks semi-Lagrangian advection (grid_sample)
+      - -e ./ddft
