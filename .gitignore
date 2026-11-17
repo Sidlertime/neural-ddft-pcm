@@ -17,3 +17,8 @@ ddft/results/
 __pycache__
 *.egg-info
 .aider*
+
+# training/eval logs and local legacy outputs
+ddft/logs/
+ddft/legacy/scripts/evaluation/results/
+bd/results/
