@@ -31,7 +31,11 @@ class PowerFunctionalNet(nn.Module):
         self.use_gamma = use_gamma
         self.use_eta = use_eta
 
-        in_channels = 4 + sum(getattr(self, flag) for flag in OPTIONAL_CHANNELS)
+        # grad_rho/grad_v are always-on here (never ablated) - "use_grad" in
+        # OPTIONAL_CHANNELS is specific to SuperadiabaticNet's channel-
+        # ablation study and must be excluded from this generic sum/loop,
+        # same as model.py's own special-case handling of that flag.
+        in_channels = 4 + sum(getattr(self, flag) for flag in OPTIONAL_CHANNELS if flag != "use_grad")
 
         # Cascading conv+pool blocks mirror the frozen free-energy CNN's
         # pattern (circular padding for periodic BCs, Mish for the same
@@ -76,6 +80,8 @@ class PowerFunctionalNet(nn.Module):
         provided = {"use_vext": v_ext, "use_rho_prev": rho_prev, "use_v_prev": v_prev,
                     "use_accel": accel, "use_gamma": gamma, "use_eta": eta}
         for flag in OPTIONAL_CHANNELS:
+            if flag == "use_grad":
+                continue  # always-on base channel here, see in_channels comment above
             if getattr(self, flag):
                 tensor = provided[flag]
                 if tensor is None:

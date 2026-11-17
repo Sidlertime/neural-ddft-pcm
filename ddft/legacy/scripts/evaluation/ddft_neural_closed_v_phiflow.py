@@ -84,7 +84,7 @@ base_model.to(device)
 base_model.eval()
 
 # B. Load the Trainable Superadiabatic Model
-sup_model = SuperadiabaticNet(channels=16).to(device)
+sup_model = SuperadiabaticNet(channels=16, use_grad=False).to(device)
 if args.sup_model is not None:
     # args.sup_model should point to checkpoints/superadiabatic_net_epoch_X.ckpt
     finetuned_ckpt = f"models/{args.sup_model}" 
@@ -162,7 +162,7 @@ def get_f_sup_phiflow(rho_grid, v_grid):
     
     # Forward pass (no gradients needed for evaluation)
     with torch.no_grad():
-        f_sup_pred = sup_model(rho_pt, v_pt).squeeze()
+        f_sup_pred = sup_model(rho_pt, v_pt, None, None).squeeze()
         
     # Repackage as StaggeredGrid since it directly applies to velocity
     f_sup_phi = math.tensor(f_sup_pred, spatial('x'))
